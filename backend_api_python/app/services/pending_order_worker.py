@@ -1309,7 +1309,40 @@ class PendingOrderWorker:
                             if pos_sz > 0:
                                 actual_pos_size = pos_sz
                                 break
-                
+                elif _is_hyperliquid_client(client):
+                    # HL is one-way only: each coin has at most one open position.
+                    # The HL adapter returns the same shape as Info.user_state:
+                    #   [{"position": {"coin": "BTC", "szi": "0.1", "entryPx": "60000", ...}}, ...]
+                    # szi is signed (positive=long, negative=short); for reduce_only
+                    # close orders we only need the magnitude.
+                    pos_list = client.get_positions(symbol=str(symbol or "")) or []
+                    if isinstance(pos_list, list):
+                        for pos in pos_list:
+                            if not isinstance(pos, dict):
+                                continue
+                            inner = pos.get("position") or {}
+                            if not isinstance(inner, dict):
+                                continue
+                            try:
+                                szi = abs(float(inner.get("szi") or 0.0))
+                            except Exception:
+                                szi = 0.0
+                            if szi > 0:
+                                # Sanity check: signed direction should match the
+                                # close-side. If user requests close_long but the
+                                # actual position is short, skip the adjustment
+                                # and let the order go through unmodified — HL
+                                # itself will reject the bogus reduceOnly anyway.
+                                try:
+                                    raw_szi = float(inner.get("szi") or 0.0)
+                                except Exception:
+                                    raw_szi = 0.0
+                                actual_long = raw_szi > 0
+                                wanted_long = (pos_side == "long")
+                                if actual_long == wanted_long:
+                                    actual_pos_size = szi
+                                    break
+
                 # If we found actual position and it's smaller than requested, use actual size
                 if actual_pos_size > 0 and actual_pos_size < float(amount or 0.0):
                     logger.info(

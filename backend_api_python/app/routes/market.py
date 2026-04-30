@@ -93,8 +93,12 @@ def get_public_config():
 @market_bp.route('/types', methods=['GET'])
 def get_market_types():
     """Return supported market types for the add-watchlist modal."""
-    # Keep a stable UX order; add CN/HK stocks near US stocks.
-    desired_order = ['USStock', 'CNStock', 'HKStock', 'Crypto', 'Forex', 'Futures']
+    # Keep a stable UX order; add CN/HK stocks near US stocks. Hyperliquid is
+    # a Crypto-class venue but listed separately so the frontend can present
+    # it as a top-level option (different symbol conventions, EIP-712 auth,
+    # one-way only). The data-source factory aliases ``Hyperliquid`` → Crypto
+    # for v1 so K-line / AI fallback to Binance continues to work.
+    desired_order = ['USStock', 'CNStock', 'HKStock', 'Crypto', 'Hyperliquid', 'Forex', 'Futures']
     order_rank = {v: i for i, v in enumerate(desired_order)}
 
     def _normalize_item(x):

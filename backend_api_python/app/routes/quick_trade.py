@@ -308,12 +308,19 @@ def _reject_quick_trade_if_desktop_broker(exchange_id: str):
     return None
 
 
-def _reject_quick_trade_if_hyperliquid(exchange_id: str):
+def _reject_quick_trade_open_if_hyperliquid(exchange_id: str):
     """
-    Hyperliquid uses base coin sizes (not USDT amounts) and has a different
-    response shape from CCXT-style adapters. Quick-trade's USDT-amount->qty
-    reverse-calc, fee normalization, and per-exchange position-close branches
-    do not yet handle HL. Until they do, route HL users to the Strategy flow.
+    Block Hyperliquid only for the **open-position** path (``/place-order``).
+
+    The USDT-amount → base-coin-qty reverse calculation that ``/place-order``
+    relies on (fetch ticker → divide → quantize) is non-trivial for HL because
+    HL is one-way only and orders carry a slippage-capped IOC limit, not a
+    true market order. The strategy flow handles this correctly via the
+    adapter; quick-trade open-position would need its own per-exchange branch.
+
+    Read endpoints (``/balance``, ``/position``) and ``/close-position`` ARE
+    supported for HL (close-position works because we already have
+    ``place_order_from_signal`` wired for HL with the actual base-coin size).
     """
     e = (exchange_id or "").strip().lower()
     if e == "hyperliquid":
@@ -321,12 +328,19 @@ def _reject_quick_trade_if_hyperliquid(exchange_id: str):
             {
                 "code": 0,
                 "msg": (
-                    "Hyperliquid 暂不支持 Quick Trade（v1）。请在「交易策略」里绑定 Hyperliquid 凭据使用。"
-                    " | Hyperliquid quick-trade is not supported in v1. Use it via a trading Strategy."
+                    "Hyperliquid 不支持通过 Quick Trade 开仓（v1）。请在「交易策略」里建仓；"
+                    "Quick Trade 的查看余额 / 持仓 / 一键平仓功能可正常使用。"
+                    " | Hyperliquid open-position via Quick Trade is not supported in v1. "
+                    "Open via a Strategy. Read balance/position and close-position are available."
                 ),
             }
         ), 400
     return None
+
+
+# Backwards-compat alias kept until callers are updated; identical behavior to
+# ``_reject_quick_trade_open_if_hyperliquid``.
+_reject_quick_trade_if_hyperliquid = _reject_quick_trade_open_if_hyperliquid
 
 
 def _record_quick_trade(
@@ -710,9 +724,7 @@ def get_balance():
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
             return qt_rej
-        qt_rej_hl = _reject_quick_trade_if_hyperliquid(exchange_id)
-        if qt_rej_hl is not None:
-            return qt_rej_hl
+        # NOTE: HL is supported on /balance — _parse_balance has a Hyperliquid branch.
 
         client = _create_client(exchange_config, market_type=market_type)
 
@@ -775,6 +787,20 @@ def _parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, An
     if not raw:
         return result
     try:
+        # Hyperliquid: HyperliquidClient.get_balance() returns {"perp": {...}, "spot": {...}}.
+        # Use perp.marginSummary.accountValue for total and perp.withdrawable for available.
+        # Currency is always USDC on HL.
+        if ex0 == "hyperliquid" and isinstance(raw, dict) and ("perp" in raw or "spot" in raw):
+            perp = raw.get("perp") or {}
+            margin_summary = perp.get("marginSummary") or {} if isinstance(perp, dict) else {}
+            total = _num(margin_summary.get("accountValue"))
+            withdrawable = _num(perp.get("withdrawable") if isinstance(perp, dict) else 0)
+            # HL "available" semantic: withdrawable USDC (after margin lock).
+            result["available"] = withdrawable
+            result["total"] = total if total > 0 else withdrawable
+            result["currency"] = "USDC"
+            return result
+
         # Gate.io spot: GET /api/v4/spot/accounts returns a list
         if isinstance(raw, list) and ex0 == "gate":
             for item in raw:
@@ -1081,6 +1107,53 @@ def _fetch_exchange_positions_raw(
     if isinstance(client, DeepcoinClient):
         return client.get_positions(symbol=symbol)
 
+    # Hyperliquid: returns ``[{"position": {coin, szi, entryPx, ...}}, ...]``
+    # Flatten to a CCXT-style list with the fields ``_parse_positions`` looks
+    # for, so we don't need to special-case the parser too.
+    try:
+        from app.services.live_trading.hyperliquid import HyperliquidClient
+        if isinstance(client, HyperliquidClient):
+            raw = client.get_positions(symbol=symbol) or []
+            out_items = []
+            for p in raw if isinstance(raw, list) else []:
+                if not isinstance(p, dict):
+                    continue
+                inner = p.get("position") or {}
+                if not isinstance(inner, dict):
+                    continue
+                try:
+                    raw_szi = float(inner.get("szi") or 0.0)
+                except Exception:
+                    raw_szi = 0.0
+                if abs(raw_szi) < 1e-12:
+                    continue
+                coin = str(inner.get("coin") or "").upper()
+                # HL is one-way: side derived from sign of szi.
+                side = "long" if raw_szi > 0 else "short"
+                lev_obj = inner.get("leverage") or {}
+                try:
+                    lev_value = float(lev_obj.get("value") if isinstance(lev_obj, dict) else lev_obj or 1)
+                except Exception:
+                    lev_value = 1.0
+                out_items.append({
+                    # _parse_positions reads "symbol" / "instId" / "contract"...
+                    # We provide a normalised "BASE/USDT"-style display so the
+                    # downstream symbol matcher can find it via fuzzy compare.
+                    "symbol": f"{coin}/USDT",
+                    "size": abs(raw_szi),                      # already in base coin
+                    "side": side,
+                    "entryPrice": float(inner.get("entryPx") or 0),
+                    "unrealizedPnl": float(inner.get("unrealizedPnl") or 0),
+                    "leverage": lev_value,
+                    "markPrice": 0,                            # not in user_state; left 0
+                    # keep the raw HL payload for debugging
+                    "_hl_raw": p,
+                })
+            return out_items
+    except ImportError:
+        # SDK not installed in this environment — fall through.
+        pass
+
     if hasattr(client, "get_positions"):
         try:
             return client.get_positions(symbol=symbol)
@@ -1359,12 +1432,12 @@ def close_position():
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
             return qt_rej
-        qt_rej_hl = _reject_quick_trade_if_hyperliquid(exchange_id)
-        if qt_rej_hl is not None:
-            return qt_rej_hl
+        # NOTE: HL is supported on /close-position — _fetch_exchange_positions_raw
+        # has a Hyperliquid branch and place_order_from_signal already routes
+        # close orders through HyperliquidClient.
 
         client = _create_client(exchange_config, market_type=market_type)
-        
+
         # ---- get current position ----
         positions = []
         try:

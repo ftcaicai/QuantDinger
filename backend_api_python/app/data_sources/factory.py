@@ -17,6 +17,13 @@ logger = get_logger(__name__)
 _MARKET_ALIASES: Dict[str, str] = {
     "crypto": "Crypto",
     "cryptocurrency": "Crypto",
+    # Hyperliquid is exposed as its own market type to the frontend (different
+    # symbol conventions / EIP-712 auth / one-way only), but K-line / AI / quote
+    # data still come from the Crypto data source (Binance) in v1. Strategy
+    # & backtest paths transparently route HL coins through
+    # ``maybe_transform_kline_symbol`` so HYPE/PURR raise instead of returning
+    # silent zeros. Promoting Hyperliquid to a real source is a v2 task.
+    "hyperliquid": "Crypto",
     "forex": "Forex",
     "fx": "Forex",
     "usstock": "USStock",
@@ -134,13 +141,15 @@ class DataSourceFactory:
         Returns:
             K线数据列表
         """
-        m = cls.normalize_market(market or "")
-
-        # HL fallback transform happens BEFORE the catch-all so KlineSymbolError
-        # is not swallowed into an empty list.
+        # HL fallback transform happens BEFORE normalization so the helper can
+        # see the original "Hyperliquid" market value (normalize_market aliases
+        # it to Crypto). Also placed BEFORE the catch-all so KlineSymbolError
+        # propagates instead of becoming an empty list.
         symbol = maybe_transform_kline_symbol(
-            exchange_id=exchange_id, market=m, symbol=symbol,
+            exchange_id=exchange_id, market=market, symbol=symbol,
         )
+
+        m = cls.normalize_market(market or "")
 
         try:
             source = cls.get_source(m)
@@ -172,10 +181,10 @@ class DataSourceFactory:
                 ...
             }
         """
-        m = cls.normalize_market(market or "")
         symbol = maybe_transform_kline_symbol(
-            exchange_id=exchange_id, market=m, symbol=symbol,
+            exchange_id=exchange_id, market=market, symbol=symbol,
         )
+        m = cls.normalize_market(market or "")
         try:
             source = cls.get_source(m)
             return source.get_ticker(symbol)

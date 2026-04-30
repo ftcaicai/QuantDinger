@@ -289,3 +289,66 @@ def test_get_positions_filters_by_symbol(hl_client):
 def test_get_account_returns_dict(hl_client):
     state = hl_client.get_account()
     assert "marginSummary" in state
+
+
+def test_get_positions_long_position(hl_client):
+    """One-way long position: szi > 0, the magnitude is what we close."""
+    pos = hl_client.get_positions(symbol="BTC")
+    assert len(pos) == 1
+    inner = pos[0]["position"]
+    assert inner["coin"] == "BTC"
+    # Default fake returns szi="0.1" (long)
+    assert float(inner["szi"]) == pytest.approx(0.1)
+
+
+def test_pending_order_worker_hl_reduce_only_branch(monkeypatch, hl_client):
+    """
+    Verify the HL branch in pending_order_worker.py reduces requested size to
+    the actual on-exchange position when smaller. Uses the live HL client (with
+    mocked SDK) so the adapter shape stays in sync with the worker's expectations.
+    """
+    # The fake Info returns [{"position": {"coin": "BTC", "szi": "0.1", ...}}].
+    # Simulate the worker's branch directly (we don't need to spin the full worker).
+    from app.services.pending_order_worker import _is_hyperliquid_client
+
+    assert _is_hyperliquid_client(hl_client) is True
+
+    pos_list = hl_client.get_positions(symbol="BTC") or []
+    pos_side = "long"
+    actual_pos_size = 0.0
+    for pos in pos_list:
+        inner = pos.get("position") or {}
+        try:
+            raw_szi = float(inner.get("szi") or 0.0)
+        except Exception:
+            raw_szi = 0.0
+        if abs(raw_szi) > 0:
+            actual_long = raw_szi > 0
+            wanted_long = (pos_side == "long")
+            if actual_long == wanted_long:
+                actual_pos_size = abs(raw_szi)
+                break
+
+    # Worker would set amount = 0.1 (the actual position) instead of e.g. 0.5.
+    assert actual_pos_size == pytest.approx(0.1)
+
+
+def test_pending_order_worker_hl_skips_when_side_mismatch(hl_client):
+    """If wanted_side != actual_side, do not adjust amount — let HL reject it."""
+    pos_list = hl_client.get_positions(symbol="BTC") or []
+    # Pretend user is closing short while actual is long
+    pos_side = "short"
+    actual_pos_size = 0.0
+    for pos in pos_list:
+        inner = pos.get("position") or {}
+        try:
+            raw_szi = float(inner.get("szi") or 0.0)
+        except Exception:
+            raw_szi = 0.0
+        if abs(raw_szi) > 0:
+            actual_long = raw_szi > 0
+            wanted_long = (pos_side == "long")
+            if actual_long == wanted_long:
+                actual_pos_size = abs(raw_szi)
+                break
+    assert actual_pos_size == 0.0

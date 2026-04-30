@@ -184,4 +184,6 @@ BTC/USDT 入站
 - **Hyperliquid 独占 token 无 Binance 等价**：`HYPE`、`PURR` 等 HL 上线但 Binance 没有的资产，回测/策略 K 线路径会抛 `KlineSymbolError`（继而被 `routes/strategy.py /backtest` 转成 400）。fallback 链路：`KlineService.get_kline` 与 `DataSourceFactory.get_kline` 都收 `exchange_id` 参数，`maybe_transform_kline_symbol` 在 fetch 之前完成 HL→Binance 转换；HL 独占 token → `None` → 抛错。Backtest 用 `_current_exchange_id: ContextVar` 透传 `exchange_id`，避免 5+ 处方法签名改动。下单/持仓不受影响。
 - **HL 不能粘贴主钱包私钥**：`BaseSignedClient` 在初始化时校验 agent 推导地址必须 ≠ `wallet_address`，否则直接抛错。`routes/credentials.py::/create` 也会做同样检查在落库前拦截一次。
 - **HL 暂不走 limit-first 流程**：`pending_order_worker` 检测到 HL client 时强制 `use_limit_first=False`，全走 market（IOC limit）。Maker / post-only / cancel-and-market 留待二期。
-- **HL Quick-Trade 暂未支持**：`routes/quick_trade.py` 三个端点都加了 HL 闸门返回 400，引导用户走 Strategy。
+- **HL Quick-Trade**：`/balance`、`/position`、`/close-position` 已支持（HL `marginSummary.accountValue` / `[{position: {...}}]` 在 `_parse_balance` / `_fetch_exchange_positions_raw` 里展平）。`/place-order` 开仓仍返回 400（USDT→qty 反算未实现）。
+- **HL 关仓自动修正 amount**：`pending_order_worker` reduce-only 路径已加 HL 分支，按 `client.get_positions(symbol).position.szi` 修正。HL 是 one-way，long/short 通过 szi 符号判断；side 与 close 方向不一致时跳过修正让 HL 自己 reject。
+- **Hyperliquid 作为顶级 market type**：`routes/market.py /types` 新增 `Hyperliquid` 选项；`DataSourceFactory._MARKET_ALIASES` 把它别名到 `Crypto`，K 线/AI 仍走 Binance fallback。`maybe_transform_kline_symbol` 同时识别 `exchange_id='hyperliquid'` 与 `market='Hyperliquid'`，前者来自策略凭据，后者来自前端市场选择器。

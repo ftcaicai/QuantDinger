@@ -68,15 +68,16 @@ Build any IndicatorStrategy or ScriptStrategy and select your Hyperliquid creden
 - **Leverage**: set per-strategy. Hyperliquid will silently cap to the current tier maximum.
 - **Hedge mode**: not available. If you migrate a Binance dual-side strategy, evaluate the close logic carefully — buys against an existing short position will *net*, not open a new long.
 
-## Step 6 — Quick-trade (NOT supported in v1)
+## Step 6 — Quick-trade (partial in v1)
 
-`POST /api/quick-trade/place-order` with `exchange_id=hyperliquid` returns 400:
+| Endpoint | Status | Notes |
+|----------|--------|-------|
+| `GET /api/quick-trade/balance` | ✓ Supported | Returns `{available, total, currency: "USDC"}` from `marginSummary.accountValue` + `withdrawable` |
+| `GET /api/quick-trade/position` | ✓ Supported | Flattens HL `[{position: {...}}]` into the same shape as other exchanges |
+| `POST /api/quick-trade/close-position` | ✓ Supported | Sends a reduce-only IOC order via `place_order_from_signal` |
+| `POST /api/quick-trade/place-order` (open position) | ✗ Returns 400 | USDT→qty reverse-calc + per-exchange filters not wired for HL — open via a Strategy |
 
-```
-Hyperliquid quick-trade is not supported in v1. Use it via a trading Strategy.
-```
-
-Quick-trade depends on USDT-amount-to-base-quantity reverse calculation, fee normalization, and per-exchange position-close branches that haven't been wired for HL yet.
+The "panic close" use-case (manually flatten an open HL position from the QuantDinger UI) works in v1.
 
 ## Limitations & gotchas
 
@@ -88,8 +89,11 @@ Quick-trade depends on USDT-amount-to-base-quantity reverse calculation, fee nor
 | Subaccount (`account_address`) | ✓ Supported |
 | One-way position mode | ✓ Only mode HL supports |
 | Hedge mode | ✗ Not available on HL |
-| Quick-trade UI | ✗ Returns 400 — use Strategy |
+| Hyperliquid as a top-level market type in the UI | ✓ Added |
+| Quick-trade balance / position / close-position | ✓ Supported |
+| Quick-trade place-order (open) | ✗ Returns 400 — open via Strategy |
 | Limit-first / maker order mode | ✗ Forced to market |
+| Strategy reduce-only auto-adjust to actual on-exchange position | ✓ Supported |
 | Backtest on HL-exclusive tokens (HYPE, PURR) | ✗ "Symbol not supported" |
 | WebSocket streams | ✗ REST polling only |
 | Builder code (HL referral) | ✗ Future release |

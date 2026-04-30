@@ -68,15 +68,16 @@ UI：**策略 → 新建 → 交易所选 Hyperliquid → 测试连接**。
 - **杠杆**：策略层设置即可，HL 会按当前 tier 上限静默封顶。
 - **Hedge mode**：不存在。从 Binance 双向持仓策略迁移过来时，要重新评估关仓逻辑——已有空头时下买单会**净额对冲**而不是开新多头。
 
-## 第 6 步：Quick-Trade（v1 不支持）
+## 第 6 步：Quick-Trade（v1 部分支持）
 
-`POST /api/quick-trade/place-order` 当 `exchange_id=hyperliquid` 时会返回 400：
+| 端点 | 状态 | 说明 |
+|------|------|------|
+| `GET /api/quick-trade/balance` | ✓ 支持 | 返回 `{available, total, currency: "USDC"}`，从 `marginSummary.accountValue` + `withdrawable` 解析 |
+| `GET /api/quick-trade/position` | ✓ 支持 | 把 HL `[{position: {...}}]` 展平成与其它交易所一致的结构 |
+| `POST /api/quick-trade/close-position` | ✓ 支持 | 通过 `place_order_from_signal` 下 reduce-only IOC 单 |
+| `POST /api/quick-trade/place-order`（开仓） | ✗ 返回 400 | USDT→qty 反算 + 每个交易所的 filter 还没接 HL，请通过策略开仓 |
 
-```
-Hyperliquid quick-trade is not supported in v1. Use it via a trading Strategy.
-```
-
-Quick-Trade 依赖 USDT 金额→基础币数量反算、手续费归一、每个交易所一套关仓分支，HL 这些尚未接好。
+"一键平仓"（在 QuantDinger UI 里手动关掉 HL 仓位）这个最常用的应急场景在 v1 已经能用。
 
 ## v1 限制一览
 
@@ -88,8 +89,11 @@ Quick-Trade 依赖 USDT 金额→基础币数量反算、手续费归一、每�
 | 子账户 (`account_address`) | ✓ 支持 |
 | 单向持仓 | ✓ HL 唯一模式 |
 | Hedge 模式 | ✗ HL 本身不存在 |
-| Quick-Trade UI | ✗ 返回 400，请用策略 |
+| Hyperliquid 作为顶级市场出现在 UI 选项 | ✓ 已加 |
+| Quick-Trade 余额 / 持仓 / 一键平仓 | ✓ 支持 |
+| Quick-Trade 开仓 (place-order) | ✗ 返回 400，请用策略开仓 |
 | Limit-first / maker 模式 | ✗ 强制 market |
+| 策略关仓时按交易所真实仓位自动修正 amount | ✓ 支持 |
 | HL 独占 token 回测 | ✗ "symbol not supported" |
 | WebSocket 行情 | ✗ 仅 REST 轮询 |
 | Builder code（HL 推广分润） | ✗ 后续版本 |

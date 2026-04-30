@@ -241,20 +241,14 @@ def maybe_transform_kline_symbol(
     Raises ``KlineSymbolError`` when the resolved coin has no Binance market
     (HYPE, PURR, ...).
     """
+    # Hyperliquid is a Crypto exchange (peer of binance / okx), not a market
+    # type. The transform fires only when a strategy is bound to a Hyperliquid
+    # credential — i.e. ``exchange_id='hyperliquid'`` — and the underlying
+    # market is Crypto.
     eid = (exchange_id or "").strip().lower()
-    market_str = (market or "").strip()
-    market_lower = market_str.lower()
-    # Trigger when EITHER the strategy is bound to a Hyperliquid credential OR
-    # the user picked "Hyperliquid" from the market dropdown directly. After
-    # ``DataSourceFactory.normalize_market`` aliases ``Hyperliquid`` -> ``Crypto``
-    # we still see the original market value here (transform happens before
-    # normalization in the factory).
-    is_hl = (eid == "hyperliquid") or (market_lower == "hyperliquid")
-    if not is_hl:
+    if eid != "hyperliquid":
         return symbol
-    # Once we know it's HL, the underlying data comes from the Crypto source.
-    # Accept "Crypto" and "Hyperliquid" both — anything else is out of scope.
-    if market_str not in ("Crypto", "Hyperliquid") and market_lower not in ("crypto", "hyperliquid"):
+    if (market or "").strip() != "Crypto":
         return symbol
 
     s = (symbol or "").strip()

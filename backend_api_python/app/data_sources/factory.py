@@ -14,16 +14,12 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # 小写 / 别名 -> 与 _create_source 一致的 PascalCase key
+# NOTE: Hyperliquid is NOT a market type; it's an exchange under Crypto. The
+# HL→Binance K-line fallback is keyed on the strategy's ``exchange_id``, not
+# on a market alias.
 _MARKET_ALIASES: Dict[str, str] = {
     "crypto": "Crypto",
     "cryptocurrency": "Crypto",
-    # Hyperliquid is exposed as its own market type to the frontend (different
-    # symbol conventions / EIP-712 auth / one-way only), but K-line / AI / quote
-    # data still come from the Crypto data source (Binance) in v1. Strategy
-    # & backtest paths transparently route HL coins through
-    # ``maybe_transform_kline_symbol`` so HYPE/PURR raise instead of returning
-    # silent zeros. Promoting Hyperliquid to a real source is a v2 task.
-    "hyperliquid": "Crypto",
     "forex": "Forex",
     "fx": "Forex",
     "usstock": "USStock",

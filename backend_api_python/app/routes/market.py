@@ -92,13 +92,14 @@ def get_public_config():
 
 @market_bp.route('/types', methods=['GET'])
 def get_market_types():
-    """Return supported market types for the add-watchlist modal."""
-    # Keep a stable UX order; add CN/HK stocks near US stocks. Hyperliquid is
-    # a Crypto-class venue but listed separately so the frontend can present
-    # it as a top-level option (different symbol conventions, EIP-712 auth,
-    # one-way only). The data-source factory aliases ``Hyperliquid`` → Crypto
-    # for v1 so K-line / AI fallback to Binance continues to work.
-    desired_order = ['USStock', 'CNStock', 'HKStock', 'Crypto', 'Hyperliquid', 'Forex', 'Futures']
+    """Return supported market types for the add-watchlist modal.
+
+    Hyperliquid is **not** a market type — it's an exchange under the Crypto
+    market (peer of Binance, OKX, etc.). The frontend should select Crypto
+    here, then narrow to a specific exchange via a separate selector or via
+    the user's bound credential.
+    """
+    desired_order = ['USStock', 'CNStock', 'HKStock', 'Crypto', 'Forex', 'Futures']
     order_rank = {v: i for i, v in enumerate(desired_order)}
 
     def _normalize_item(x):
@@ -169,36 +170,41 @@ def search_symbols():
     """
     Lightweight symbol search.
     DB seed first; for Crypto, falls back to exchange market list when DB yields few results.
+
+    Optional ``exchange_id`` query param narrows / re-labels Crypto results by
+    venue. Today the only meaningful value is ``hyperliquid``: results are
+    re-displayed as ``BASE/USDC`` (HL's quote convention) and the wire-level
+    K-line path maps them back to Binance ``BASE/USDT`` for the v1 fallback.
+    Without ``exchange_id`` the endpoint behaves as before (Binance USDT
+    pairs under ``market='Crypto'``).
     """
     try:
         market = (request.args.get('market') or '').strip()
         keyword = (request.args.get('keyword') or '').strip().upper()
         limit = int(request.args.get('limit') or 20)
+        exchange_id = (request.args.get('exchange_id') or '').strip().lower()
 
         if not market or not keyword:
             return jsonify({'code': 1, 'msg': 'success', 'data': []})
 
         out = seed_search_symbols(market=market, keyword=keyword, limit=limit)
 
-        if market == 'Crypto' and len(out) < 3:
-            extra = _search_crypto_exchange(keyword, limit - len(out), {r['symbol'] for r in out})
-            out.extend(extra)
-        elif market == 'Hyperliquid':
-            # v1: HL has no native data source; we reuse the Binance USDT pair
-            # list but rewrite the quote as USDC so the UI matches HL's actual
-            # USDC-denominated markets. Backend K-line path strips the quote
-            # via from_hl_to_binance_equivalent so "BTC/USDC" -> "BTC/USDT" on
-            # the wire. Seed table is empty for HL, so this fallback is the
-            # ONLY source — don't gate on len(out).
-            existing = {r['symbol'] for r in out}
-            extra = _search_crypto_exchange(
-                keyword,
-                limit - len(out),
-                existing,
-                display_market='Hyperliquid',
-                display_quote='USDC',
-            )
-            out.extend(extra)
+        if market == 'Crypto':
+            if exchange_id == 'hyperliquid':
+                # HL has no native data source in v1; reuse Binance USDT list
+                # but display as BASE/USDC. Seed table is HL-blind so this is
+                # the only source — don't gate on len(out).
+                existing = {r['symbol'] for r in out}
+                extra = _search_crypto_exchange(
+                    keyword,
+                    limit - len(out),
+                    existing,
+                    display_quote='USDC',
+                )
+                out.extend(extra)
+            elif len(out) < 3:
+                extra = _search_crypto_exchange(keyword, limit - len(out), {r['symbol'] for r in out})
+                out.extend(extra)
 
         return jsonify({'code': 1, 'msg': 'success', 'data': out})
     except Exception as e:
@@ -215,19 +221,16 @@ def _search_crypto_exchange(
     limit: int,
     existing: set,
     *,
-    display_market: str = 'Crypto',
     display_quote: str = 'USDT',
 ) -> list:
     """
     Dynamically search exchange (via CCXT) for crypto pairs matching keyword.
     Caches the full market list for 4 hours to avoid repeated API calls.
 
-    ``display_market`` / ``display_quote`` let callers re-label the result for
-    venues that don't have their own data source yet. Hyperliquid (v1) reuses
-    Binance's USDT list but presents results as ``BASE/USDC`` under
-    ``market='Hyperliquid'`` so the UI matches HL's actual USDC-denominated
-    markets. The wire-level K-line path then maps ``BASE/USDC`` back to
-    ``BASE/USDT`` via ``from_hl_to_binance_equivalent``.
+    ``display_quote`` lets HL callers re-label results as ``BASE/USDC`` (HL's
+    actual quote) while still matching against Binance's USDT cache. The
+    wire-level K-line path maps ``BASE/USDC`` back to ``BASE/USDT`` via
+    ``from_hl_to_binance_equivalent``. Market is always ``Crypto``.
     """
     if limit <= 0:
         return []
@@ -270,7 +273,7 @@ def _search_crypto_exchange(
             if display_sym in existing:
                 continue
             if kw in base_up or kw in sym.upper():
-                results.append({"market": display_market, "symbol": display_sym, "name": m["name"]})
+                results.append({"market": "Crypto", "symbol": display_sym, "name": m["name"]})
                 if len(results) >= limit:
                     break
         return results

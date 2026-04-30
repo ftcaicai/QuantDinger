@@ -89,8 +89,8 @@ The "panic close" use-case (manually flatten an open HL position from the QuantD
 | Subaccount (`account_address`) | ✓ Supported |
 | One-way position mode | ✓ Only mode HL supports |
 | Hedge mode | ✗ Not available on HL |
-| Hyperliquid as a top-level market type in the UI | ✓ Added |
-| `/api/market/symbols/search?market=Hyperliquid` | ✓ Returns Binance USDT pairs displayed as `BASE/USDC` (HL's quote convention). HL-exclusive tokens (HYPE, PURR) don't appear in v1; P2 will pull HL's own universe. |
+| Hyperliquid as a top-level market type in the UI | ✗ Not a market — Hyperliquid is a **Crypto exchange** (peer of Binance / OKX). UI selects Crypto + binds an HL credential. |
+| `/api/market/symbols/search?market=Crypto&exchange_id=hyperliquid` | ✓ Returns Binance USDT pairs displayed as `BASE/USDC` (HL's quote convention). HL-exclusive tokens (HYPE, PURR) don't appear in v1; P2 will pull HL's own universe. |
 | Quick-trade balance / position / close-position | ✓ Supported |
 | Quick-trade place-order (open) | ✗ Returns 400 — open via Strategy |
 | Limit-first / maker order mode | ✗ Forced to market |

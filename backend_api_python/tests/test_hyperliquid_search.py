@@ -1,17 +1,16 @@
-"""Tests for /api/market/symbols/search?market=Hyperliquid.
+"""Tests for /api/market/symbols/search with the Hyperliquid exchange.
 
-The search endpoint had no Hyperliquid branch; HL queries fell through the
-seed-table lookup (empty) and skipped the CCXT fallback (Crypto-only). Now
-``Hyperliquid`` reuses the Binance USDT pair list but rewrites display
-``market`` to ``Hyperliquid`` and quote to ``USDC`` so the UI matches HL's
-actual USDC-denominated markets.
+Hyperliquid is a Crypto-market exchange (peer of Binance / OKX), not a
+top-level market type. Frontend must pass ``market=Crypto`` plus an
+``exchange_id=hyperliquid`` hint when searching from an HL context. With
+that hint the backend reuses the Binance USDT pair list but rewrites the
+display quote to USDC so the UI matches HL's actual market convention.
 """
 
 from __future__ import annotations
 
 import sys
 import types
-from unittest import mock
 
 import pytest
 
@@ -54,42 +53,47 @@ def _patch_ccxt(monkeypatch):
     monkeypatch.setitem(sys.modules, "ccxt", fake_ccxt)
 
 
-def test_search_hyperliquid_returns_results_with_usdc_quote(client, app, monkeypatch):
+def test_search_with_hl_exchange_hint_returns_usdc_quote(client, app, monkeypatch):
+    """``market=Crypto`` + ``exchange_id=hyperliquid`` -> BASE/USDC results."""
     _patch_ccxt(monkeypatch)
-    # seed table is empty for Hyperliquid; we only care about the fallback
     monkeypatch.setattr(
         "app.routes.market.seed_search_symbols",
         lambda **_: [],
     )
 
-    resp = client.get("/api/market/symbols/search?market=Hyperliquid&keyword=BTC&limit=20")
+    resp = client.get(
+        "/api/market/symbols/search?market=Crypto&exchange_id=hyperliquid&keyword=BTC&limit=20"
+    )
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["code"] == 1
     items = body["data"]
     assert len(items) >= 1
-    # Every result should be displayed under Hyperliquid market with /USDC quote
     btc_match = next((r for r in items if r["symbol"] == "BTC/USDC"), None)
     assert btc_match is not None, items
-    assert btc_match["market"] == "Hyperliquid"
+    # Market label remains Crypto — HL is a Crypto exchange, not a market.
+    assert btc_match["market"] == "Crypto"
     assert btc_match["name"] == "BTC"
 
 
-def test_search_hyperliquid_with_slash_in_keyword(client, app, monkeypatch):
-    """Searching "BTC/USDC" (with slash + HL quote) must still find the pair."""
+def test_search_with_hl_exchange_hint_slash_in_keyword(client, app, monkeypatch):
+    """Searching ``BTC/USDC`` directly must still match (the keyword
+    normalization strips both /USDT and /USDC)."""
     _patch_ccxt(monkeypatch)
     monkeypatch.setattr(
         "app.routes.market.seed_search_symbols",
         lambda **_: [],
     )
 
-    resp = client.get("/api/market/symbols/search?market=Hyperliquid&keyword=BTC%2FUSDC&limit=20")
+    resp = client.get(
+        "/api/market/symbols/search?market=Crypto&exchange_id=hyperliquid&keyword=BTC%2FUSDC&limit=20"
+    )
     assert resp.status_code == 200
     items = resp.get_json()["data"]
-    assert any(r["symbol"] == "BTC/USDC" and r["market"] == "Hyperliquid" for r in items)
+    assert any(r["symbol"] == "BTC/USDC" and r["market"] == "Crypto" for r in items)
 
 
-def test_search_crypto_regression_unaffected(client, app, monkeypatch):
+def test_search_crypto_without_hl_hint_unchanged(client, app, monkeypatch):
     """Existing Crypto search must still return BASE/USDT under market=Crypto."""
     _patch_ccxt(monkeypatch)
     monkeypatch.setattr(
@@ -105,18 +109,36 @@ def test_search_crypto_regression_unaffected(client, app, monkeypatch):
     assert btc["market"] == "Crypto"
 
 
-def test_search_hyperliquid_exclusive_token_returns_empty(client, app, monkeypatch):
-    """v1 limitation: HL-exclusive tokens (HYPE, PURR) have no Binance equivalent
-    so the search returns empty rather than a misleading hit. This is documented
-    in the trading guide as a v1 limit; P2 will pull HL's own universe."""
+def test_search_hl_exclusive_token_returns_empty(client, app, monkeypatch):
+    """v1 limit: HL-exclusive tokens (HYPE, PURR) have no Binance equivalent
+    so the search returns empty rather than a misleading hit. P2 (independent
+    HL data source) will pull HL's own universe and surface them."""
     _patch_ccxt(monkeypatch)
     monkeypatch.setattr(
         "app.routes.market.seed_search_symbols",
         lambda **_: [],
     )
 
-    resp = client.get("/api/market/symbols/search?market=Hyperliquid&keyword=HYPE&limit=20")
+    resp = client.get(
+        "/api/market/symbols/search?market=Crypto&exchange_id=hyperliquid&keyword=HYPE&limit=20"
+    )
     assert resp.status_code == 200
     items = resp.get_json()["data"]
-    # HYPE isn't in our fake Binance markets — must return empty, not crash.
     assert items == []
+
+
+def test_search_market_hyperliquid_no_longer_treated_as_market(client, app, monkeypatch):
+    """Regression guard: a stale frontend that still sends ``market=Hyperliquid``
+    must not crash; it just gets the seed-table-empty default (i.e. ``[]``).
+    HL is no longer a market type."""
+    _patch_ccxt(monkeypatch)
+    monkeypatch.setattr(
+        "app.routes.market.seed_search_symbols",
+        lambda **_: [],
+    )
+
+    resp = client.get("/api/market/symbols/search?market=Hyperliquid&keyword=BTC&limit=20")
+    assert resp.status_code == 200
+    # No HL-specific code path is taken; seed is empty -> []. The new
+    # contract is: send market=Crypto + exchange_id=hyperliquid.
+    assert resp.get_json()["data"] == []

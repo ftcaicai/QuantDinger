@@ -89,8 +89,8 @@ UI：**策略 → 新建 → 交易所选 Hyperliquid → 测试连接**。
 | 子账户 (`account_address`) | ✓ 支持 |
 | 单向持仓 | ✓ HL 唯一模式 |
 | Hedge 模式 | ✗ HL 本身不存在 |
-| Hyperliquid 作为顶级市场出现在 UI 选项 | ✓ 已加 |
-| `/api/market/symbols/search?market=Hyperliquid` | ✓ 返回 Binance USDT 对，但显示为 `BASE/USDC`（HL 的计价习惯）。HL 独占 token（HYPE、PURR）v1 搜不到；P2 会拉 HL 自己的 universe。 |
+| Hyperliquid 作为顶级市场出现在 UI 选项 | ✗ HL 是 **Crypto market 下的交易所**（与 Binance、OKX 平级），不是独立的 market 类型。UI 选 Crypto + 绑 HL 凭据即可。 |
+| `/api/market/symbols/search?market=Crypto&exchange_id=hyperliquid` | ✓ 返回 Binance USDT 对，但显示为 `BASE/USDC`（HL 的计价习惯）。HL 独占 token（HYPE、PURR）v1 搜不到；P2 会拉 HL 自己的 universe。 |
 | Quick-Trade 余额 / 持仓 / 一键平仓 | ✓ 支持 |
 | Quick-Trade 开仓 (place-order) | ✗ 返回 400，请用策略开仓 |
 | Limit-first / maker 模式 | ✗ 强制 market |

@@ -1,6 +1,10 @@
 """Tests for the v1 ``reuse Binance prices`` fallback that gates Hyperliquid
 strategies through ``maybe_transform_kline_symbol`` before any K-line fetch.
 
+Hyperliquid is a Crypto-market exchange (peer of Binance), not its own market
+type. The transform fires when the strategy is bound to an HL credential —
+i.e. ``exchange_id='hyperliquid'`` AND ``market='Crypto'``.
+
 The transform must:
   - pass non-HL traffic through unchanged;
   - rewrite HL perp symbols to Binance equivalents;

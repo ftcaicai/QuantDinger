@@ -30,11 +30,9 @@ _FAKE_MARKETS = {
 def _reset_market_cache():
     """Reset the module-level cache between tests so each test sees a fresh load."""
     from app.routes import market as market_route
-    market_route._crypto_markets_cache["data"] = None
-    market_route._crypto_markets_cache["ts"] = 0
+    market_route._crypto_markets_cache.clear()
     yield
-    market_route._crypto_markets_cache["data"] = None
-    market_route._crypto_markets_cache["ts"] = 0
+    market_route._crypto_markets_cache.clear()
 
 
 def _patch_ccxt(monkeypatch):
@@ -125,6 +123,64 @@ def test_search_hl_exclusive_token_returns_empty(client, app, monkeypatch):
     assert resp.status_code == 200
     items = resp.get_json()["data"]
     assert items == []
+
+
+def test_search_keyword_with_usdc_quote_returns_usdc_pair(client, app, monkeypatch):
+    """User-reported bug: searching ``btc/usdc`` under ``market=Crypto`` (no
+    exchange_id hint) was returning ``BTC/USDT`` because the cache was hard-
+    coded to USDT-only. Now the keyword's explicit quote wins."""
+    _patch_ccxt(monkeypatch)
+    monkeypatch.setattr(
+        "app.routes.market.seed_search_symbols",
+        lambda **_: [],
+    )
+
+    resp = client.get("/api/market/symbols/search?market=Crypto&keyword=btc%2Fusdc&limit=20")
+    assert resp.status_code == 200
+    items = resp.get_json()["data"]
+    btc_usdc = next((r for r in items if r["symbol"] == "BTC/USDC"), None)
+    assert btc_usdc is not None, items
+    assert btc_usdc["market"] == "Crypto"
+    # And it should NOT have promoted BTC/USDT (we're being explicit about USDC)
+    assert not any(r["symbol"] == "BTC/USDT" for r in items)
+
+
+def test_search_keyword_with_usdt_quote_returns_usdt_pair(client, app, monkeypatch):
+    """Symmetric: ``btc/usdt`` returns USDT pair."""
+    _patch_ccxt(monkeypatch)
+    monkeypatch.setattr(
+        "app.routes.market.seed_search_symbols",
+        lambda **_: [],
+    )
+
+    resp = client.get("/api/market/symbols/search?market=Crypto&keyword=BTC%2FUSDT&limit=20")
+    assert resp.status_code == 200
+    items = resp.get_json()["data"]
+    assert any(r["symbol"] == "BTC/USDT" for r in items)
+    assert not any(r["symbol"] == "BTC/USDC" for r in items)
+
+
+def test_search_keyword_no_quote_uses_default(client, app, monkeypatch):
+    """Bare ``BTC`` (no quote) falls back to the caller's default — USDT for
+    plain Crypto, USDC for the HL hint."""
+    _patch_ccxt(monkeypatch)
+    monkeypatch.setattr(
+        "app.routes.market.seed_search_symbols",
+        lambda **_: [],
+    )
+
+    # Plain Crypto -> USDT default
+    resp = client.get("/api/market/symbols/search?market=Crypto&keyword=BTC&limit=20")
+    assert resp.status_code == 200
+    items = resp.get_json()["data"]
+    assert any(r["symbol"] == "BTC/USDT" for r in items)
+
+    # Same query with HL hint -> USDC default
+    resp = client.get(
+        "/api/market/symbols/search?market=Crypto&exchange_id=hyperliquid&keyword=BTC&limit=20"
+    )
+    items = resp.get_json()["data"]
+    assert any(r["symbol"] == "BTC/USDC" for r in items)
 
 
 def test_search_market_hyperliquid_no_longer_treated_as_market(client, app, monkeypatch):

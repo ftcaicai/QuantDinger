@@ -191,15 +191,16 @@ def search_symbols():
 
         if market == 'Crypto':
             if exchange_id == 'hyperliquid':
-                # HL has no native data source in v1; reuse Binance USDT list
-                # but display as BASE/USDC. Seed table is HL-blind so this is
-                # the only source — don't gate on len(out).
+                # HL has no native data source in v1; default quote is USDC
+                # (HL convention). Seed table is HL-blind so this is the only
+                # source — don't gate on len(out). The keyword still wins:
+                # "BTC/USDT" returns BTC/USDT, "BTC" returns BTC/USDC.
                 existing = {r['symbol'] for r in out}
                 extra = _search_crypto_exchange(
                     keyword,
                     limit - len(out),
                     existing,
-                    display_quote='USDC',
+                    default_quote='USDC',
                 )
                 out.extend(extra)
             elif len(out) < 3:
@@ -213,7 +214,60 @@ def search_symbols():
         return jsonify({'code': 0, 'msg': str(e), 'data': []}), 500
 
 
-_crypto_markets_cache: dict = {"data": None, "ts": 0}
+# Cache keyed by quote (USDT, USDC, ...) so we can serve any quote without a
+# round-trip per call. Each entry: {"data": [...], "ts": <epoch>}.
+_crypto_markets_cache: dict = {}
+
+# Quotes we consider "stable" for the on-the-fly search fallback. ``USDT`` is
+# the historical default; ``USDC`` is added so users searching ``BTC/USDC``
+# (e.g. on HL or Binance spot) get the actual USDC pair.
+_SEARCHABLE_QUOTES = ("USDT", "USDC")
+
+
+def _parse_search_quote(keyword: str) -> tuple[str, str]:
+    """
+    Extract base + explicit quote from a search keyword.
+
+    >>> _parse_search_quote("BTC/USDC")  # ("BTC", "USDC")
+    >>> _parse_search_quote("ETH/USDT")  # ("ETH", "USDT")
+    >>> _parse_search_quote("SOL")       # ("SOL", "")
+    >>> _parse_search_quote("BTCUSDT")   # ("BTC", "")  (concatenated form, treated as base-only fuzzy)
+    """
+    s = (keyword or "").strip().upper()
+    if "/" in s:
+        base, quote = s.split("/", 1)
+        return base.strip(), quote.strip()
+    return s, ""
+
+
+def _load_crypto_markets_for_quote(quote: str) -> list:
+    """Load + cache active ``BASE/<quote>`` pairs from the configured exchange."""
+    import ccxt  # type: ignore
+    from app.config.data_sources import CCXTConfig
+
+    quote_u = (quote or "USDT").upper()
+    now = time.time()
+    cached = _crypto_markets_cache.get(quote_u)
+    if cached and (now - cached["ts"] < 14400):
+        return cached["data"]
+
+    exchange_cls = getattr(ccxt, CCXTConfig.DEFAULT_EXCHANGE, None) or ccxt.gate
+    ex = exchange_cls()
+    ex.load_markets()
+    markets = []
+    for sym, info in ex.markets.items():
+        if not info.get("active"):
+            continue
+        if info.get("quote", "").upper() != quote_u:
+            continue
+        markets.append({
+            "symbol": sym,
+            "base": info.get("base", ""),
+            "name": info.get("base", sym),
+        })
+    _crypto_markets_cache[quote_u] = {"data": markets, "ts": now}
+    logger.info("Cached %d %s crypto pairs from %s", len(markets), quote_u, CCXTConfig.DEFAULT_EXCHANGE)
+    return markets
 
 
 def _search_crypto_exchange(
@@ -221,59 +275,40 @@ def _search_crypto_exchange(
     limit: int,
     existing: set,
     *,
-    display_quote: str = 'USDT',
+    default_quote: str = 'USDT',
 ) -> list:
     """
     Dynamically search exchange (via CCXT) for crypto pairs matching keyword.
-    Caches the full market list for 4 hours to avoid repeated API calls.
+    Caches the market list per-quote for 4 hours.
 
-    ``display_quote`` lets HL callers re-label results as ``BASE/USDC`` (HL's
-    actual quote) while still matching against Binance's USDT cache. The
-    wire-level K-line path maps ``BASE/USDC`` back to ``BASE/USDT`` via
-    ``from_hl_to_binance_equivalent``. Market is always ``Crypto``.
+    Quote selection:
+      1. If ``keyword`` includes ``/QUOTE`` (e.g. ``BTC/USDC``) → use that quote.
+      2. Otherwise → fall back to ``default_quote`` (callers pass ``USDC`` for
+         Hyperliquid, ``USDT`` for plain Crypto).
+    Quotes outside ``_SEARCHABLE_QUOTES`` (currently USDT, USDC) coerce to the
+    default to avoid blowing up the cache with niche pairs.
     """
     if limit <= 0:
         return []
     try:
-        import ccxt  # type: ignore
-        from app.config.data_sources import CCXTConfig
+        base_kw, explicit_quote = _parse_search_quote(keyword)
+        target_quote = explicit_quote if explicit_quote in _SEARCHABLE_QUOTES else default_quote.upper()
+        if target_quote not in _SEARCHABLE_QUOTES:
+            target_quote = "USDT"
 
-        now = time.time()
-        if _crypto_markets_cache["data"] and now - _crypto_markets_cache["ts"] < 14400:
-            markets = _crypto_markets_cache["data"]
-        else:
-            exchange_cls = getattr(ccxt, CCXTConfig.DEFAULT_EXCHANGE, None) or ccxt.gate
-            ex = exchange_cls()
-            ex.load_markets()
-            markets = []
-            for sym, info in ex.markets.items():
-                if not info.get("active"):
-                    continue
-                quote = info.get("quote", "")
-                if quote != "USDT":
-                    continue
-                markets.append({
-                    "symbol": sym,
-                    "base": info.get("base", ""),
-                    "name": info.get("base", sym),
-                })
-            _crypto_markets_cache["data"] = markets
-            _crypto_markets_cache["ts"] = now
-            logger.info("Cached %d USDT crypto pairs from %s", len(markets), CCXTConfig.DEFAULT_EXCHANGE)
+        markets = _load_crypto_markets_for_quote(target_quote)
 
-        # Strip both USDT and USDC from the keyword so HL users searching
-        # "BTC/USDC" still match the underlying BASE/USDT cache.
-        kw = keyword.upper().replace("/USDT", "").replace("/USDC", "").replace("/", "")
-        quote_u = (display_quote or 'USDT').upper()
+        # Match against base coin name (or full ``BASE/QUOTE``). ``BTCUSDT`` /
+        # ``BTC`` / ``BTC/USDC`` should all hit the same BTC pair.
+        match_kw = base_kw or keyword.upper().replace("/", "")
         results = []
         for m in markets:
             sym = m["symbol"]
             base_up = m["base"].upper()
-            display_sym = sym if quote_u == 'USDT' else f"{base_up}/{quote_u}"
-            if display_sym in existing:
+            if sym in existing:
                 continue
-            if kw in base_up or kw in sym.upper():
-                results.append({"market": "Crypto", "symbol": display_sym, "name": m["name"]})
+            if match_kw in base_up or match_kw in sym.upper():
+                results.append({"market": "Crypto", "symbol": sym, "name": m["name"]})
                 if len(results) >= limit:
                     break
         return results

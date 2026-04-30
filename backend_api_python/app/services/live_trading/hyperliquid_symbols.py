@@ -22,6 +22,19 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 
+class KlineSymbolError(Exception):
+    """
+    Raised when a Hyperliquid symbol cannot be resolved to a K-line source.
+
+    This typically means an HL-exclusive token (PURR, HYPE, ...) that has no
+    Binance equivalent for the v1 "reuse Binance prices" fallback.
+
+    Callers (routes, backtest, AI analysis) should catch this and surface a
+    user-friendly message rather than feeding empty K-line data into a
+    strategy or model.
+    """
+
+
 def _split_base_quote(symbol: str) -> Tuple[str, str]:
     """Local copy of symbols._split_base_quote to avoid a circular import."""
     s = (symbol or "").strip()
@@ -200,3 +213,58 @@ def from_hl_to_binance_equivalent(
     if base in _HL_TO_BINANCE_OVERRIDES:
         return _HL_TO_BINANCE_OVERRIDES[base]
     return f"{base}/USDT"
+
+
+def maybe_transform_kline_symbol(
+    *,
+    exchange_id: Optional[str],
+    market: str,
+    symbol: str,
+    spot_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    K-line entry-point hook for the v1 "reuse Binance prices" fallback.
+
+    When a strategy is bound to Hyperliquid, the K-line / AI / backtest paths
+    still pull data from the default crypto data source (Binance via CCXT).
+    The strategy's symbol arrives in HL form (``BTC``, ``HYPE``, ``@107``);
+    this function rewrites it to the Binance-equivalent (``BTC/USDT``) the
+    data source actually understands, OR raises ``KlineSymbolError`` for
+    HL-exclusive tokens that have no equivalent.
+
+    Pass-through behavior (returns ``symbol`` unchanged):
+    - ``exchange_id`` is anything other than ``hyperliquid``
+    - ``market`` is anything other than ``Crypto``
+    - the symbol already looks like a Binance market (``BTC/USDT``,
+      ``BTCUSDT``, ``ETH/USDT:USDT``)
+
+    Raises ``KlineSymbolError`` when the resolved coin has no Binance market
+    (HYPE, PURR, ...).
+    """
+    eid = (exchange_id or "").strip().lower()
+    if eid != "hyperliquid":
+        return symbol
+    if (market or "").strip() != "Crypto":
+        return symbol
+
+    s = (symbol or "").strip()
+    if not s:
+        return s
+
+    # Already in Binance form? Treat anything that contains "/" or a known
+    # quote suffix as already-resolved and pass through. The downstream data
+    # source's own normalization handles the rest.
+    if "/" in s:
+        return s
+    upper = s.upper()
+    for q in ("USDT", "USDC", "USD", "BTC", "ETH", "BUSD", "BNB"):
+        if upper.endswith(q) and len(upper) > len(q):
+            return upper
+
+    equivalent = from_hl_to_binance_equivalent(s, spot_meta=spot_meta)
+    if equivalent is None:
+        raise KlineSymbolError(
+            f"Hyperliquid symbol '{s}' has no Binance-equivalent market for "
+            f"backtest / AI analysis in v1. Live trading on HL still works."
+        )
+    return equivalent

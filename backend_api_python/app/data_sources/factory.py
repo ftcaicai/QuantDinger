@@ -5,6 +5,10 @@
 from typing import Dict, List, Any, Optional
 
 from app.data_sources.base import BaseDataSource
+from app.services.live_trading.hyperliquid_symbols import (
+    KlineSymbolError,
+    maybe_transform_kline_symbol,
+)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -110,10 +114,11 @@ class DataSourceFactory:
         limit: int,
         before_time: Optional[int] = None,
         after_time: Optional[int] = None,
+        exchange_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         获取K线数据的便捷方法
-        
+
         Args:
             market: 市场类型
             symbol: 交易对/股票代码
@@ -121,32 +126,44 @@ class DataSourceFactory:
             limit: 数据条数
             before_time: 获取此时间之前的数据
             after_time: 可选，Unix 秒，K 线 time 需 >= 此值（回测左边界）
-            
+            exchange_id: 可选，策略绑定的交易所。当为 ``hyperliquid`` 时
+                按 v1 fallback 把 HL coin 转成 Binance 等价市场；HL 独占
+                token (HYPE/PURR…) 直接抛 ``KlineSymbolError``，让上层报
+                "不支持回测/AI 分析" 而不是静默返回空数据。
+
         Returns:
             K线数据列表
         """
+        m = cls.normalize_market(market or "")
+
+        # HL fallback transform happens BEFORE the catch-all so KlineSymbolError
+        # is not swallowed into an empty list.
+        symbol = maybe_transform_kline_symbol(
+            exchange_id=exchange_id, market=m, symbol=symbol,
+        )
+
         try:
-            m = cls.normalize_market(market or "")
             source = cls.get_source(m)
             klines = source.get_kline(symbol, timeframe, limit, before_time, after_time)
-            
+
             # 确保数据按时间排序
             klines.sort(key=lambda x: x['time'])
-            
+
             return klines
         except Exception as e:
-            logger.error(f"Failed to fetch K-lines {market}:{symbol} (normalized={cls.normalize_market(market or '')}) - {str(e)}")
+            logger.error(f"Failed to fetch K-lines {market}:{symbol} (normalized={m}) - {str(e)}")
             return []
     
     @classmethod
-    def get_ticker(cls, market: str, symbol: str) -> Dict[str, Any]:
+    def get_ticker(cls, market: str, symbol: str, exchange_id: Optional[str] = None) -> Dict[str, Any]:
         """
         获取实时报价的便捷方法
-        
+
         Args:
             market: 市场类型
             symbol: 交易对/股票代码
-            
+            exchange_id: 可选，策略绑定的交易所；同 ``get_kline``。
+
         Returns:
             实时报价数据: {
                 'last': 最新价,
@@ -155,8 +172,11 @@ class DataSourceFactory:
                 ...
             }
         """
+        m = cls.normalize_market(market or "")
+        symbol = maybe_transform_kline_symbol(
+            exchange_id=exchange_id, market=m, symbol=symbol,
+        )
         try:
-            m = cls.normalize_market(market or "")
             source = cls.get_source(m)
             return source.get_ticker(symbol)
         except NotImplementedError:

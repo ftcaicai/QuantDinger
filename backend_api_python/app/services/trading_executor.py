@@ -951,7 +951,8 @@ class TradingExecutor:
             # ============================================
             # logger.info(f"策略 {strategy_id} 初始化：获取历史K线数据...")
             history_limit = int(os.getenv('K_LINE_HISTORY_GET_NUMBER', 500))
-            klines = self._fetch_latest_kline(symbol, timeframe, limit=history_limit, market_category=market_category)
+            _strategy_exchange_id = ((strategy.get('exchange_config') or {}).get('exchange_id') or '').strip().lower() or None
+            klines = self._fetch_latest_kline(symbol, timeframe, limit=history_limit, market_category=market_category, exchange_id=_strategy_exchange_id)
             if not klines or len(klines) < 2:
                 logger.error(f"Strategy {strategy_id} failed to fetch K-lines")
                 return
@@ -1105,7 +1106,7 @@ class TradingExecutor:
                     # 2. 检查是否需要更新K线（每个K线周期更新一次，从API拉取）
                     # ============================================
                     if current_time - last_kline_update_time >= kline_update_interval:
-                        klines = self._fetch_latest_kline(symbol, timeframe, limit=history_limit, market_category=market_category)
+                        klines = self._fetch_latest_kline(symbol, timeframe, limit=history_limit, market_category=market_category, exchange_id=_strategy_exchange_id)
                         if klines and len(klines) >= 2:
                             df = self._klines_to_dataframe(klines)
                             if len(df) > 0:
@@ -1632,24 +1633,40 @@ class TradingExecutor:
                 self._exchange_fee_cache[strategy_id] = None
             return None
 
-    def _fetch_latest_kline(self, symbol: str, timeframe: str, limit: int = 500, market_category: str = 'Crypto') -> List[Dict[str, Any]]:
+    def _fetch_latest_kline(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 500,
+        market_category: str = 'Crypto',
+        exchange_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """获取最新K线数据（优先从缓存获取）
-        
+
         Args:
             symbol: 交易对/代码
             timeframe: 时间周期
             limit: 数据条数
             market_category: 市场类型 (Crypto, USStock, Forex, Futures)
+            exchange_id: 可选，策略绑定的交易所；用于 Hyperliquid -> Binance
+                行情兼容路径。HL 独占 token 会让 KlineSymbolError 冒出，本方法
+                单独捕获并写日志，让调用方拿到空 K 线 + 明确错误日志。
         """
+        from app.services.live_trading.hyperliquid_symbols import KlineSymbolError
         try:
-            # 使用 KlineService 获取K线数据（自动处理缓存）
             return self.kline_service.get_kline(
                 market=market_category,
                 symbol=symbol,
                 timeframe=timeframe,
                 limit=limit,
-                before_time=int(time.time())
+                before_time=int(time.time()),
+                exchange_id=exchange_id,
             )
+        except KlineSymbolError as e:
+            # Strategy will see empty klines -> log a clear "unsupported"
+            # message instead of letting the user wonder why nothing happens.
+            logger.error(f"K-line not available for {market_category}:{symbol} via {exchange_id}: {e}")
+            return []
         except Exception as e:
             logger.error(f"Failed to fetch K-lines for {market_category}:{symbol}: {str(e)}")
             return []

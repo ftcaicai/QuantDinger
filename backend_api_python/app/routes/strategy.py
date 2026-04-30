@@ -374,7 +374,20 @@ def run_strategy_backtest():
             }), 400
 
         svc = get_backtest_service()
-        result = svc.run_strategy_snapshot(snapshot, start_date=start_date, end_date=end_date)
+        try:
+            result = svc.run_strategy_snapshot(snapshot, start_date=start_date, end_date=end_date)
+        except Exception as _maybe_kline_err:
+            # Hyperliquid exclusive tokens (HYPE / PURR / ...) have no Binance
+            # K-line equivalent in v1. Surface a clear "unsupported" message
+            # instead of a 500 / generic backend error.
+            from app.services.live_trading.hyperliquid_symbols import KlineSymbolError
+            if isinstance(_maybe_kline_err, KlineSymbolError):
+                return jsonify({
+                    'code': 0,
+                    'msg': str(_maybe_kline_err),
+                    'data': None,
+                }), 400
+            raise
         run_id = svc.persist_run(
             user_id=user_id,
             indicator_id=snapshot.get('indicator_id'),

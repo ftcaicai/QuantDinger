@@ -1,6 +1,7 @@
 """
 Backtest Service
 """
+import contextvars
 import hashlib
 import json
 import math
@@ -18,6 +19,13 @@ from app.data_sources import DataSourceFactory
 from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
 from app.services.indicator_params import IndicatorParamsParser, IndicatorCaller
+
+# Per-request exchange_id (set by run_strategy_snapshot, read by _fetch_kline_data).
+# Using a ContextVar avoids threading exchange_id through ~5 internal entry points.
+# Set/reset is scoped via Token to survive nested method calls.
+_current_exchange_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_current_backtest_exchange_id", default=None,
+)
 
 logger = get_logger(__name__)
 
@@ -1464,6 +1472,22 @@ class BacktestService:
         if not snapshot:
             raise ValueError("strategy snapshot is required")
 
+        # Stash exchange_id for the duration of this call so _fetch_kline_data
+        # can pick up "hyperliquid" and route through HL->Binance fallback.
+        exchange_cfg = snapshot.get('exchange_config') or {}
+        eid = (exchange_cfg.get('exchange_id') or '').strip().lower() or None
+        token = _current_exchange_id.set(eid)
+        try:
+            return self._run_strategy_snapshot_inner(snapshot, start_date, end_date)
+        finally:
+            _current_exchange_id.reset(token)
+
+    def _run_strategy_snapshot_inner(
+        self,
+        snapshot: Dict[str, Any],
+        start_date: datetime,
+        end_date: datetime,
+    ) -> Dict[str, Any]:
         code = snapshot.get('code') or ''
         market = snapshot.get('market') or 'Crypto'
         symbol = snapshot.get('symbol') or ''
@@ -1727,9 +1751,16 @@ class BacktestService:
         symbol: str,
         timeframe: str,
         start_date: datetime,
-        end_date: datetime
+        end_date: datetime,
+        exchange_id: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Fetch candle data and convert to DataFrame (with in-memory caching)"""
+        """Fetch candle data and convert to DataFrame (with in-memory caching).
+
+        ``exchange_id`` is forwarded to ``DataSourceFactory.get_kline`` so that
+        Hyperliquid-bound strategies can transparently fall back to the Binance
+        equivalent. HL-exclusive tokens raise ``KlineSymbolError`` which we
+        propagate so the route layer can return a user-friendly error.
+        """
         # Calculate required candle count (+ slack for 2y-class windows & upstream gaps)
         total_seconds = (end_date - start_date).total_seconds()
         tf_seconds = self.TIMEFRAME_SECONDS.get(timeframe, 86400)
@@ -1747,8 +1778,13 @@ class BacktestService:
         if cached is not None and not cached.empty:
             logger.info(f"K-line cache HIT for {cache_key} ({len(cached)} candles)")
             return cached
-        
-        # Fetch data
+
+        # If caller didn't specify exchange_id, fall back to the ContextVar
+        # set by run_strategy_snapshot (None for non-strategy callers).
+        if exchange_id is None:
+            exchange_id = _current_exchange_id.get()
+
+        # Fetch data — KlineSymbolError (HL exclusive) propagates by design.
         kline_data = DataSourceFactory.get_kline(
             market=market,
             symbol=symbol,
@@ -1756,6 +1792,7 @@ class BacktestService:
             limit=limit,
             before_time=before_time,
             after_time=after_time,
+            exchange_id=exchange_id,
         )
         
         if not kline_data:

@@ -4,6 +4,7 @@ K线数据服务
 from typing import Dict, List, Any, Optional
 
 from app.data_sources import DataSourceFactory
+from app.services.live_trading.hyperliquid_symbols import maybe_transform_kline_symbol
 from app.utils.cache import CacheManager
 from app.utils.logger import get_logger
 from app.config import CacheConfig
@@ -13,65 +14,77 @@ logger = get_logger(__name__)
 
 class KlineService:
     """K线数据服务"""
-    
+
     def __init__(self):
         self.cache = CacheManager()
         self.cache_ttl = CacheConfig.KLINE_CACHE_TTL
-    
+
     def get_kline(
         self,
         market: str,
         symbol: str,
         timeframe: str,
         limit: int = 300,
-        before_time: Optional[int] = None
+        before_time: Optional[int] = None,
+        exchange_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         获取K线数据
-        
+
         Args:
             market: 市场类型 (Crypto, USStock, Forex, Futures)
             symbol: 交易对/股票代码
             timeframe: 时间周期
             limit: 数据条数
             before_time: 获取此时间之前的数据
-            
+            exchange_id: 可选，策略绑定的交易所。当为 ``hyperliquid`` 时把
+                HL symbol 转成 Binance 等价市场；HL 独占 token (HYPE/PURR…)
+                直接抛 ``KlineSymbolError``。
+
         Returns:
             K线数据列表
         """
+        # Resolve HL symbol up-front so cache key & data source see the same
+        # Binance-equivalent. ``KlineSymbolError`` propagates out (not caught
+        # here on purpose — caller decides how to surface "unsupported symbol").
+        resolved_symbol = maybe_transform_kline_symbol(
+            exchange_id=exchange_id, market=market, symbol=symbol,
+        )
+
         # 构建缓存键（历史数据不缓存）
         if not before_time:
-            cache_key = f"kline:{market}:{symbol}:{timeframe}:{limit}"
+            cache_key = f"kline:{market}:{resolved_symbol}:{timeframe}:{limit}"
             cached = self.cache.get(cache_key)
             if cached:
                 # logger.info(f"命中缓存: {cache_key}")
                 return cached
-        
+
         # 获取数据
         klines = DataSourceFactory.get_kline(
             market=market,
-            symbol=symbol,
+            symbol=resolved_symbol,
             timeframe=timeframe,
             limit=limit,
-            before_time=before_time
+            before_time=before_time,
+            # exchange_id intentionally NOT forwarded — we already transformed.
         )
-        
+
         # 设置缓存（仅最新数据）
         if klines and not before_time:
             ttl = self.cache_ttl.get(timeframe, 300)
             self.cache.set(cache_key, klines, ttl)
             # logger.info(f"缓存设置: {cache_key}, TTL: {ttl}s")
-        
+
         return klines
     
-    def get_latest_price(self, market: str, symbol: str) -> Optional[Dict[str, Any]]:
+    def get_latest_price(self, market: str, symbol: str, exchange_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """获取最新价格（使用1分钟K线，已弃用，建议使用 get_realtime_price）"""
-        klines = self.get_kline(market, symbol, '1m', 1)
+        klines = self.get_kline(market, symbol, '1m', 1, exchange_id=exchange_id)
         if klines:
             return klines[-1]
         return None
-    
-    def get_realtime_price(self, market: str, symbol: str, force_refresh: bool = False) -> Dict[str, Any]:
+
+    def get_realtime_price(self, market: str, symbol: str, force_refresh: bool = False, exchange_id: Optional[str] = None) -> Dict[str, Any]:
         """
         获取实时价格（优先使用 ticker API，降级使用分钟 K 线）
         
@@ -92,14 +105,21 @@ class KlineService:
                 'source': 数据来源 ('ticker' 或 'kline')
             }
         """
+        # Resolve HL symbol up-front (raises KlineSymbolError for HL-exclusive tokens).
+        resolved_symbol = maybe_transform_kline_symbol(
+            exchange_id=exchange_id, market=market, symbol=symbol,
+        )
+
         # 构建缓存键（短时间缓存，避免频繁请求）
-        cache_key = f"realtime_price:{market}:{symbol}"
-        
+        cache_key = f"realtime_price:{market}:{resolved_symbol}"
+
         # 如果不是强制刷新，尝试使用缓存
         if not force_refresh:
             cached = self.cache.get(cache_key)
             if cached:
                 return cached
+        # All downstream calls now use the resolved (Binance-equivalent) symbol.
+        symbol = resolved_symbol
         
         result = {
             'price': 0,

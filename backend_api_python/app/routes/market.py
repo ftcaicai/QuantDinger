@@ -183,6 +183,22 @@ def search_symbols():
         if market == 'Crypto' and len(out) < 3:
             extra = _search_crypto_exchange(keyword, limit - len(out), {r['symbol'] for r in out})
             out.extend(extra)
+        elif market == 'Hyperliquid':
+            # v1: HL has no native data source; we reuse the Binance USDT pair
+            # list but rewrite the quote as USDC so the UI matches HL's actual
+            # USDC-denominated markets. Backend K-line path strips the quote
+            # via from_hl_to_binance_equivalent so "BTC/USDC" -> "BTC/USDT" on
+            # the wire. Seed table is empty for HL, so this fallback is the
+            # ONLY source — don't gate on len(out).
+            existing = {r['symbol'] for r in out}
+            extra = _search_crypto_exchange(
+                keyword,
+                limit - len(out),
+                existing,
+                display_market='Hyperliquid',
+                display_quote='USDC',
+            )
+            out.extend(extra)
 
         return jsonify({'code': 1, 'msg': 'success', 'data': out})
     except Exception as e:
@@ -194,10 +210,24 @@ def search_symbols():
 _crypto_markets_cache: dict = {"data": None, "ts": 0}
 
 
-def _search_crypto_exchange(keyword: str, limit: int, existing: set) -> list:
+def _search_crypto_exchange(
+    keyword: str,
+    limit: int,
+    existing: set,
+    *,
+    display_market: str = 'Crypto',
+    display_quote: str = 'USDT',
+) -> list:
     """
     Dynamically search exchange (via CCXT) for crypto pairs matching keyword.
     Caches the full market list for 4 hours to avoid repeated API calls.
+
+    ``display_market`` / ``display_quote`` let callers re-label the result for
+    venues that don't have their own data source yet. Hyperliquid (v1) reuses
+    Binance's USDT list but presents results as ``BASE/USDC`` under
+    ``market='Hyperliquid'`` so the UI matches HL's actual USDC-denominated
+    markets. The wire-level K-line path then maps ``BASE/USDC`` back to
+    ``BASE/USDT`` via ``from_hl_to_binance_equivalent``.
     """
     if limit <= 0:
         return []
@@ -228,15 +258,19 @@ def _search_crypto_exchange(keyword: str, limit: int, existing: set) -> list:
             _crypto_markets_cache["ts"] = now
             logger.info("Cached %d USDT crypto pairs from %s", len(markets), CCXTConfig.DEFAULT_EXCHANGE)
 
-        kw = keyword.upper().replace("/USDT", "").replace("/", "")
+        # Strip both USDT and USDC from the keyword so HL users searching
+        # "BTC/USDC" still match the underlying BASE/USDT cache.
+        kw = keyword.upper().replace("/USDT", "").replace("/USDC", "").replace("/", "")
+        quote_u = (display_quote or 'USDT').upper()
         results = []
         for m in markets:
             sym = m["symbol"]
-            if sym in existing:
-                continue
             base_up = m["base"].upper()
+            display_sym = sym if quote_u == 'USDT' else f"{base_up}/{quote_u}"
+            if display_sym in existing:
+                continue
             if kw in base_up or kw in sym.upper():
-                results.append({"market": "Crypto", "symbol": sym, "name": m["name"]})
+                results.append({"market": display_market, "symbol": display_sym, "name": m["name"]})
                 if len(results) >= limit:
                     break
         return results

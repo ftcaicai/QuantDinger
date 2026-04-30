@@ -103,8 +103,11 @@ get_ticker(symbol) -> Dict   # 可选，CCXT 风格 {"last": float, ...}
 | Gate | gate.py | 现货 / 期货 |
 | Deepcoin | deepcoin.py | 衍生品 |
 | HTX | htx.py | 现货 / U 本位 |
+| Hyperliquid | hyperliquid.py | 永续 / 现货 / Vault（**EIP-712 签名链路独立**，行情走 Binance 等价；详见 [Hyperliquid 接入指南](../HYPERLIQUID_TRADING_GUIDE_CN.md)） |
 
 每个客户端继承 `base.py::BaseRestClient`：15s 超时、SSL verify 解析、HMAC/签名工具方法。**Demo / sandbox 模式**通过 `isTestnet` / `sandbox` / `simulatedTrading` 标志识别（前端在 body 顶层或 nested `exchange_config` 都可能传，factory 合并）。
+
+**例外**：Hyperliquid 不走 `BaseRestClient`，而是继承 `BaseSignedClient`，内部包 [`hyperliquid-python-sdk`](https://pypi.org/project/hyperliquid-python-sdk/) 处理 EIP-712 / phantom-agent 签名 + nonce + msgpack 序列化。凭据形态也不同：`wallet_address`（master EOA）+ `agent_private_key`（agent 钱包私钥），不再是 `api_key`/`secret_key`。
 
 ### 符号归一化
 
@@ -177,4 +180,8 @@ BTC/USDT 入站
 - **国内数据源走代理**会被东方财富/腾讯频繁屏蔽。检查 `NO_PROXY`。
 - **MT5 仅 Windows**：CI / Linux 容器里 import 失败被静默捕获，看不到错误，要在 health 端点单独探测。
 - **Quick-Trade USDT-计价**：用户填 `$100` 时后端会用 `last` 价反算 `qty = 100 / price`，**用的是缓存的 ticker**，价格抖动大时 qty 会偏。
-- **凭据日志泄露**：直接 `logger.info(config)` 会泄漏 API key。一律先 `safe_exchange_config_for_log(config)`。
+- **凭据日志泄露**：直接 `logger.info(config)` 会泄漏 API key。一律先 `safe_exchange_config_for_log(config)`（已扩展 mask 列表覆盖 `agent_private_key` 等 HL 字段）。
+- **Hyperliquid 独占 token 无 Binance 等价**：`HYPE`、`PURR` 等 HL 上线但 Binance 没有的资产，回测/AI 路径会拿不到 K 线，需要显式提示用户"该 symbol 暂不支持回测"。`from_hl_to_binance_equivalent()` 会返回 `None` 标记这种情况。下单/持仓不受影响。
+- **HL 不能粘贴主钱包私钥**：`BaseSignedClient` 在初始化时校验 agent 推导地址必须 ≠ `wallet_address`，否则直接抛错。`routes/credentials.py::/create` 也会做同样检查在落库前拦截一次。
+- **HL 暂不走 limit-first 流程**：`pending_order_worker` 检测到 HL client 时强制 `use_limit_first=False`，全走 market（IOC limit）。Maker / post-only / cancel-and-market 留待二期。
+- **HL Quick-Trade 暂未支持**：`routes/quick_trade.py` 三个端点都加了 HL 闸门返回 400，引导用户走 Strategy。

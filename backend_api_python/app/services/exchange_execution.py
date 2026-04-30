@@ -50,7 +50,18 @@ def safe_exchange_config_for_log(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(cfg, dict):
         return {}
     out = dict(cfg)
-    for k in ["api_key", "secret_key", "passphrase", "apiKey", "secret", "password"]:
+    for k in [
+        "api_key",
+        "secret_key",
+        "passphrase",
+        "apiKey",
+        "secret",
+        "password",
+        # Hyperliquid: agent wallet private key — leak == wash-trade risk
+        "agent_private_key",
+        "agentPrivateKey",
+        "agent_key",
+    ]:
         if k in out and out.get(k):
             out[k] = mask_secret(str(out.get(k)))
     return out

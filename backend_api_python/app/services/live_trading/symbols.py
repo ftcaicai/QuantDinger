@@ -232,3 +232,32 @@ def to_htx_contract_code(symbol: str) -> str:
         return s.replace("/", "-").replace(":", "-").upper()
     return f"{base}-{quote}"
 
+
+# Re-exported from hyperliquid_symbols for callers that import from this module.
+from app.services.live_trading.hyperliquid_symbols import (  # noqa: E402
+    to_hl_perp_coin,
+    to_hl_spot_index,
+    from_hl_to_binance_equivalent,
+)
+
+__all__ = [
+    "to_binance_futures_symbol",
+    "to_okx_swap_inst_id",
+    "to_okx_spot_inst_id",
+    "to_bitget_um_symbol",
+    "to_bybit_symbol",
+    "to_coinbase_product_id",
+    "to_kraken_pair",
+    "to_kraken_futures_symbol",
+    "to_kucoin_symbol",
+    "to_kucoin_futures_symbol",
+    "to_gate_currency_pair",
+    "to_deepcoin_symbol",
+    "to_deepcoin_swap_symbol",
+    "to_htx_spot_symbol",
+    "to_htx_contract_code",
+    "to_hl_perp_coin",
+    "to_hl_spot_index",
+    "from_hl_to_binance_equivalent",
+]
+

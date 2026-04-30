@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
+from app.services.live_trading.base_signed import BaseSignedClient
 from app.services.live_trading.binance import BinanceFuturesClient
 from app.services.live_trading.binance_spot import BinanceSpotClient
 from app.services.live_trading.okx import OkxClient
@@ -30,6 +31,9 @@ DeepcoinClient = None
 
 # Lazy import HTX
 HtxClient = None
+
+# Lazy import Hyperliquid
+HyperliquidClient = None
 
 # Lazy import IBKR
 IBKRClient = None
@@ -121,7 +125,7 @@ def _quote_amount_from_base_qty(client: BaseRestClient, *, symbol: str, base_qty
 
 
 def place_order_from_signal(
-    client: BaseRestClient,
+    client: "BaseRestClient | BaseSignedClient | Any",
     *,
     signal_type: str,
     symbol: str,
@@ -268,6 +272,27 @@ def place_order_from_signal(
             qty=qty,
             reduce_only=reduce_only,
             pos_side=pos_side,
+            client_order_id=client_order_id,
+        )
+
+    # Check for Hyperliquid client (lazy import — SDK is optional)
+    global HyperliquidClient
+    if HyperliquidClient is None:
+        try:
+            from app.services.live_trading.hyperliquid import HyperliquidClient as _HyperliquidClient
+            HyperliquidClient = _HyperliquidClient
+        except ImportError:
+            pass
+
+    if HyperliquidClient is not None and isinstance(client, HyperliquidClient):
+        # HL is one-way only; ``pos_side`` is ignored. ``reduce_only`` is honored.
+        # Spot vs perp dispatch happens inside the client via ``market_type``.
+        return client.place_market_order(
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            market_type=mt,
+            reduce_only=reduce_only,
             client_order_id=client_order_id,
         )
 

@@ -308,6 +308,27 @@ def _reject_quick_trade_if_desktop_broker(exchange_id: str):
     return None
 
 
+def _reject_quick_trade_if_hyperliquid(exchange_id: str):
+    """
+    Hyperliquid uses base coin sizes (not USDT amounts) and has a different
+    response shape from CCXT-style adapters. Quick-trade's USDT-amount->qty
+    reverse-calc, fee normalization, and per-exchange position-close branches
+    do not yet handle HL. Until they do, route HL users to the Strategy flow.
+    """
+    e = (exchange_id or "").strip().lower()
+    if e == "hyperliquid":
+        return jsonify(
+            {
+                "code": 0,
+                "msg": (
+                    "Hyperliquid 暂不支持 Quick Trade（v1）。请在「交易策略」里绑定 Hyperliquid 凭据使用。"
+                    " | Hyperliquid quick-trade is not supported in v1. Use it via a trading Strategy."
+                ),
+            }
+        ), 400
+    return None
+
+
 def _record_quick_trade(
     user_id: int,
     credential_id: int,
@@ -438,6 +459,9 @@ def place_order():
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
             return qt_rej
+        qt_rej_hl = _reject_quick_trade_if_hyperliquid(exchange_id)
+        if qt_rej_hl is not None:
+            return qt_rej_hl
 
         client = _create_client(exchange_config, market_type=market_type)
 
@@ -686,6 +710,9 @@ def get_balance():
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
             return qt_rej
+        qt_rej_hl = _reject_quick_trade_if_hyperliquid(exchange_id)
+        if qt_rej_hl is not None:
+            return qt_rej_hl
 
         client = _create_client(exchange_config, market_type=market_type)
 
@@ -1332,6 +1359,9 @@ def close_position():
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
             return qt_rej
+        qt_rej_hl = _reject_quick_trade_if_hyperliquid(exchange_id)
+        if qt_rej_hl is not None:
+            return qt_rej_hl
 
         client = _create_client(exchange_config, market_type=market_type)
         

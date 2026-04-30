@@ -98,6 +98,22 @@ CRYPTO_EXCHANGES = [
     'kraken', 'kucoin', 'gate', 'deepcoin', 'htx'
 ]
 
+# Hyperliquid uses EIP-712 signed actions with an "agent wallet" — credential
+# shape differs from CCXT-style api_key/secret_key.
+HYPERLIQUID_EXCHANGES = ['hyperliquid']
+
+
+def _wallet_hint(addr: str) -> str:
+    """Mask an Ethereum address for the credential list view: 0x1234...abcd."""
+    s = str(addr or '').strip()
+    if not s:
+        return ''
+    if not s.startswith('0x') and not s.startswith('0X'):
+        s = '0x' + s
+    if len(s) <= 10:
+        return s
+    return f"{s[:6]}...{s[-4:]}"
+
 
 def _egress_ipify(url: str) -> str:
     try:
@@ -196,6 +212,49 @@ def create_credential():
                 'enable_demo_trading': exchange_demo_mode_enabled(data),
             })
             hint = _api_key_hint(api_key)
+        elif exchange_id in HYPERLIQUID_EXCHANGES:
+            # Hyperliquid: master EOA address + agent wallet private key.
+            # Reject the master EOA private key here (not just at client construction)
+            # so we never even encrypt-store the most dangerous secret.
+            wallet_address = (data.get('wallet_address') or '').strip()
+            agent_private_key = (data.get('agent_private_key') or '').strip()
+            if not wallet_address or not agent_private_key:
+                return jsonify({
+                    'code': 0,
+                    'msg': 'Hyperliquid requires wallet_address (master EOA) and agent_private_key',
+                    'data': None,
+                }), 400
+            try:
+                from eth_account import Account  # type: ignore
+                key_with_prefix = agent_private_key if agent_private_key.lower().startswith('0x') else '0x' + agent_private_key
+                derived_addr = Account.from_key(key_with_prefix).address.lower()
+                wa = wallet_address.lower()
+                if not wa.startswith('0x'):
+                    wa = '0x' + wa
+                if derived_addr == wa:
+                    return jsonify({
+                        'code': 0,
+                        'msg': 'agent_private_key matches wallet_address — that is your master EOA key. '
+                               'Generate an agent wallet at app.hyperliquid.xyz/API and paste its key instead.',
+                        'data': None,
+                    }), 400
+            except ImportError:
+                # SDK not installed yet — defer the check to client construction time.
+                pass
+            except Exception as e:
+                return jsonify({'code': 0, 'msg': f'Invalid agent_private_key: {e}', 'data': None}), 400
+
+            config.update({
+                'wallet_address': wallet_address,
+                'agent_private_key': agent_private_key,
+                'vault_address': (data.get('vault_address') or '').strip(),
+                'account_address': (data.get('account_address') or '').strip(),
+                'isTestnet': bool(data.get('isTestnet') or data.get('is_testnet')),
+                # Optional: client-supplied UTC seconds when the agent was
+                # created — used by the UI to flag the 180-day expiry.
+                'agent_created_at': int(data.get('agent_created_at') or 0) or None,
+            })
+            hint = _wallet_hint(wallet_address)
         else:
             return jsonify({'code': 0, 'msg': f'Unsupported exchange: {exchange_id}', 'data': None}), 400
 

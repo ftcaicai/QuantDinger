@@ -26,6 +26,8 @@ gunicorn>=22.0.0
 bcrypt>=4.1.0
 # Interactive Brokers trading (optional, for US stock trading via TWS/IB Gateway)
 ib_insync>=0.9.86
+# Hyperliquid DEX (optional). Brings eth-account / msgpack as transitive deps.
+hyperliquid-python-sdk>=0.23.0
 # MetaTrader 5 trading (optional, for forex trading via MT5 terminal, Windows only)
 # Note: MetaTrader5 is Windows-only and not available on Linux/macOS
 # Install separately on Windows: pip install MetaTrader5>=5.0.45

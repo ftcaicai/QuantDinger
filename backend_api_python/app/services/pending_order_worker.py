@@ -36,6 +36,26 @@ from app.services.live_trading.deepcoin import DeepcoinClient
 from app.services.live_trading.htx import HtxClient
 from app.services.live_trading.symbols import to_okx_swap_inst_id
 from app.services.live_trading.symbols import to_gate_currency_pair
+
+# Lazy import Hyperliquid (SDK is optional at install time)
+HyperliquidClient = None
+
+
+def _ensure_hyperliquid_client_loaded():
+    """Lazy-load HyperliquidClient only when first needed."""
+    global HyperliquidClient
+    if HyperliquidClient is None:
+        try:
+            from app.services.live_trading.hyperliquid import HyperliquidClient as _HL
+            HyperliquidClient = _HL
+        except ImportError:
+            pass
+    return HyperliquidClient
+
+
+def _is_hyperliquid_client(client) -> bool:
+    cls = _ensure_hyperliquid_client_loaded()
+    return cls is not None and isinstance(client, cls)
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.strategy_runtime_logs import append_strategy_log
@@ -1309,6 +1329,11 @@ class PendingOrderWorker:
 
         # Decide if we should use limit-first flow.
         use_limit_first = order_mode in ("maker", "limit", "limit_first", "maker_then_market")
+
+        # Hyperliquid does not implement the limit-first / wait-for-fill / cancel-and-market flow
+        # in this adapter yet — force market path until we add place_limit_order + wait_for_fill.
+        if _is_hyperliquid_client(client):
+            use_limit_first = False
 
         remaining = float(amount or 0.0)
         if remaining <= 0:

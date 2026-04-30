@@ -29,6 +29,9 @@ from app.services.live_trading.gate import GateSpotClient, GateUsdtFuturesClient
 from app.services.live_trading.deepcoin import DeepcoinClient
 from app.services.live_trading.htx import HtxClient
 
+# Lazy import Hyperliquid to avoid ImportError if hyperliquid-python-sdk not installed
+HyperliquidClient = None
+
 # Lazy import IBKR to avoid ImportError if ib_insync not installed
 IBKRClient = None
 IBKRConfig = None
@@ -269,6 +272,9 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
             broker_id=broker_id,
         )
 
+    if exchange_id == "hyperliquid":
+        return create_hyperliquid_client(exchange_config, market_type=mt, is_demo=is_demo)
+
     # Traditional brokers (IBKR for US stocks only)
     if exchange_id == "ibkr":
         # Note: Market category validation should be done at the caller level
@@ -282,6 +288,46 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
         return create_mt5_client(exchange_config)
 
     raise LiveTradingError(f"Unsupported exchange_id: {exchange_id}")
+
+
+def create_hyperliquid_client(exchange_config: Dict[str, Any], *, market_type: str = "swap", is_demo: bool = False):
+    """
+    Create Hyperliquid client.
+
+    exchange_config keys:
+    - wallet_address      (master EOA, 0x...)        REQUIRED
+    - agent_private_key   (agent wallet privkey)     REQUIRED
+    - vault_address                                  optional, vault trading
+    - account_address                                optional, agent-on-subaccount
+    - isTestnet / is_testnet / use_testnet / network=testnet  optional
+    """
+    global HyperliquidClient
+
+    if HyperliquidClient is None:
+        try:
+            from app.services.live_trading.hyperliquid import HyperliquidClient as _HL
+            HyperliquidClient = _HL
+        except ImportError:
+            raise LiveTradingError(
+                "Hyperliquid trading requires hyperliquid-python-sdk. "
+                "Run: pip install hyperliquid-python-sdk"
+            )
+
+    wallet_address = _get(exchange_config, "wallet_address", "walletAddress")
+    agent_private_key = _get(exchange_config, "agent_private_key", "agentPrivateKey", "agent_key")
+    if not wallet_address or not agent_private_key:
+        raise LiveTradingError("Hyperliquid requires wallet_address (master EOA) and agent_private_key")
+
+    vault_address = _get(exchange_config, "vault_address", "vaultAddress") or None
+    account_address = _get(exchange_config, "account_address", "accountAddress") or None
+
+    return HyperliquidClient(
+        wallet_address=wallet_address,
+        agent_private_key=agent_private_key,
+        is_testnet=bool(is_demo),
+        vault_address=vault_address,
+        account_address=account_address,
+    )
 
 
 def create_ibkr_client(exchange_config: Dict[str, Any]):

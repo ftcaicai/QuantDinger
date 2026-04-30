@@ -464,6 +464,13 @@ class StrategyService:
                         return client.get_balance()
                     if isinstance(client, HtxClient):
                         return client.get_balance()
+                    # Hyperliquid (signed client; isinstance check via lazy load)
+                    try:
+                        from app.services.live_trading.hyperliquid import HyperliquidClient as _HL
+                        if isinstance(client, _HL):
+                            return client.get_account()
+                    except ImportError:
+                        pass
                     return None
 
                 def _probe_market_type(market_type: str):

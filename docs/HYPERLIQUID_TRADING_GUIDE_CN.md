@@ -68,16 +68,16 @@ UI：**策略 → 新建 → 交易所选 Hyperliquid → 测试连接**。
 - **杠杆**：策略层设置即可，HL 会按当前 tier 上限静默封顶。
 - **Hedge mode**：不存在。从 Binance 双向持仓策略迁移过来时，要重新评估关仓逻辑——已有空头时下买单会**净额对冲**而不是开新多头。
 
-## 第 6 步：Quick-Trade（v1 部分支持）
+## 第 6 步：Quick-Trade（v1 完整支持）
 
 | 端点 | 状态 | 说明 |
 |------|------|------|
 | `GET /api/quick-trade/balance` | ✓ 支持 | 返回 `{available, total, currency: "USDC"}`，从 `marginSummary.accountValue` + `withdrawable` 解析 |
 | `GET /api/quick-trade/position` | ✓ 支持 | 把 HL `[{position: {...}}]` 展平成与其它交易所一致的结构 |
 | `POST /api/quick-trade/close-position` | ✓ 支持 | 通过 `place_order_from_signal` 下 reduce-only IOC 单 |
-| `POST /api/quick-trade/place-order`（开仓） | ✗ 返回 400 | USDT→qty 反算 + 每个交易所的 filter 还没接 HL，请通过策略开仓 |
+| `POST /api/quick-trade/place-order`（开仓） | ✓ 支持 | USDT 金额 → 数量通过 HL `get_ticker` 反算（与 Binance/OKX 同一套流程） |
 
-"一键平仓"（在 QuantDinger UI 里手动关掉 HL 仓位）这个最常用的应急场景在 v1 已经能用。
+开仓 / 关仓 / 余额 / 持仓查询全部按其它 Crypto 交易所一样的方式工作。
 
 ## v1 限制一览
 
@@ -91,9 +91,8 @@ UI：**策略 → 新建 → 交易所选 Hyperliquid → 测试连接**。
 | Hedge 模式 | ✗ HL 本身不存在 |
 | Hyperliquid 作为顶级市场出现在 UI 选项 | ✗ HL 是 **Crypto market 下的交易所**（与 Binance、OKX 平级），不是独立的 market 类型。UI 选 Crypto + 绑 HL 凭据即可。 |
 | `/api/market/symbols/search?market=Crypto&exchange_id=hyperliquid` | ✓ 返回 Binance USDT 对，但显示为 `BASE/USDC`（HL 的计价习惯）。HL 独占 token（HYPE、PURR）v1 搜不到；P2 会拉 HL 自己的 universe。 |
-| Quick-Trade 余额 / 持仓 / 一键平仓 | ✓ 支持 |
-| Quick-Trade 开仓 (place-order) | ✗ 返回 400，请用策略开仓 |
-| Limit-first / maker 模式 | ✗ 强制 market |
+| Quick-Trade 余额 / 持仓 / 一键平仓 / 开仓 | ✓ 全部支持 |
+| Limit-first / maker 模式 | ✓ 支持（`order_mode=maker`/`limit_first` 用 HL 的 ALO TIF） |
 | 策略关仓时按交易所真实仓位自动修正 amount | ✓ 支持 |
 | HL 独占 token 回测 | ✗ "symbol not supported" |
 | WebSocket 行情 | ✗ 仅 REST 轮询 |

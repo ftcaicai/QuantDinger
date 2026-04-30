@@ -137,10 +137,9 @@ class DataSourceFactory:
         Returns:
             K线数据列表
         """
-        # HL fallback transform happens BEFORE normalization so the helper can
-        # see the original "Hyperliquid" market value (normalize_market aliases
-        # it to Crypto). Also placed BEFORE the catch-all so KlineSymbolError
-        # propagates instead of becoming an empty list.
+        # HL fallback transform runs BEFORE the catch-all below so
+        # KlineSymbolError (HL-exclusive token like HYPE / PURR) propagates
+        # to the caller instead of being swallowed into an empty list.
         symbol = maybe_transform_kline_symbol(
             exchange_id=exchange_id, market=market, symbol=symbol,
         )

@@ -308,39 +308,11 @@ def _reject_quick_trade_if_desktop_broker(exchange_id: str):
     return None
 
 
-def _reject_quick_trade_open_if_hyperliquid(exchange_id: str):
-    """
-    Block Hyperliquid only for the **open-position** path (``/place-order``).
-
-    The USDT-amount → base-coin-qty reverse calculation that ``/place-order``
-    relies on (fetch ticker → divide → quantize) is non-trivial for HL because
-    HL is one-way only and orders carry a slippage-capped IOC limit, not a
-    true market order. The strategy flow handles this correctly via the
-    adapter; quick-trade open-position would need its own per-exchange branch.
-
-    Read endpoints (``/balance``, ``/position``) and ``/close-position`` ARE
-    supported for HL (close-position works because we already have
-    ``place_order_from_signal`` wired for HL with the actual base-coin size).
-    """
-    e = (exchange_id or "").strip().lower()
-    if e == "hyperliquid":
-        return jsonify(
-            {
-                "code": 0,
-                "msg": (
-                    "Hyperliquid 不支持通过 Quick Trade 开仓（v1）。请在「交易策略」里建仓；"
-                    "Quick Trade 的查看余额 / 持仓 / 一键平仓功能可正常使用。"
-                    " | Hyperliquid open-position via Quick Trade is not supported in v1. "
-                    "Open via a Strategy. Read balance/position and close-position are available."
-                ),
-            }
-        ), 400
-    return None
-
-
-# Backwards-compat alias kept until callers are updated; identical behavior to
-# ``_reject_quick_trade_open_if_hyperliquid``.
-_reject_quick_trade_if_hyperliquid = _reject_quick_trade_open_if_hyperliquid
+# Note: The HL open-position gate (_reject_quick_trade_open_if_hyperliquid)
+# was removed when /place-order was wired for Hyperliquid via
+# place_order_from_signal + the existing ticker-based USDT->qty conversion.
+# Intentionally NO replacement helper here — HL is now treated like any
+# other Crypto exchange.
 
 
 def _record_quick_trade(
@@ -473,9 +445,6 @@ def place_order():
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
             return qt_rej
-        qt_rej_hl = _reject_quick_trade_if_hyperliquid(exchange_id)
-        if qt_rej_hl is not None:
-            return qt_rej_hl
 
         client = _create_client(exchange_config, market_type=market_type)
 
@@ -699,6 +668,14 @@ def _limit_order_kwargs(client, symbol, amount, price, side, market_type, client
         return kwargs
     if isinstance(client, (BybitClient, DeepcoinClient)):
         return {"qty": amount, "price": price, "client_order_id": client_order_id}
+    # Hyperliquid: ``qty`` + ``market_type`` (HL is one-way; route uses caller's
+    # passed ``side`` directly, and HL signs as buy/sell internally).
+    try:
+        from app.services.live_trading.hyperliquid import HyperliquidClient
+        if isinstance(client, HyperliquidClient):
+            return {"qty": amount, "price": price, "market_type": market_type, "client_order_id": client_order_id}
+    except ImportError:
+        pass
     # Generic fallback
     return {"size": amount, "price": price, "client_order_id": client_order_id}
 

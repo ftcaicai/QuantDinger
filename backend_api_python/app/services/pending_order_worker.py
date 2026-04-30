@@ -1363,11 +1363,6 @@ class PendingOrderWorker:
         # Decide if we should use limit-first flow.
         use_limit_first = order_mode in ("maker", "limit", "limit_first", "maker_then_market")
 
-        # Hyperliquid does not implement the limit-first / wait-for-fill / cancel-and-market flow
-        # in this adapter yet — force market path until we add place_limit_order + wait_for_fill.
-        if _is_hyperliquid_client(client):
-            use_limit_first = False
-
         remaining = float(amount or 0.0)
         if remaining <= 0:
             self._mark_failed(order_id=order_id, error="invalid_amount")
@@ -1573,6 +1568,26 @@ class PendingOrderWorker:
                         pos_side=pos_side,
                         client_order_id=limit_client_oid,
                     )
+                elif _is_hyperliquid_client(client):
+                    # HL is one-way; pos_side is ignored. post_only=True would
+                    # use ALO (HL rejects on cross). order_mode="maker"/"limit"
+                    # implies normal Gtc; we choose Alo only when caller asked
+                    # explicitly via order_mode='maker'.
+                    if market_type == "swap":
+                        try:
+                            client.set_leverage(symbol=str(symbol), leverage=leverage)
+                        except Exception:
+                            pass
+                    res1 = client.place_limit_order(
+                        symbol=str(symbol),
+                        side="BUY" if side == "buy" else "SELL",
+                        qty=remaining,
+                        price=limit_price,
+                        market_type=market_type,
+                        reduce_only=reduce_only,
+                        post_only=(order_mode in ("maker", "limit_first")),
+                        client_order_id=limit_client_oid,
+                    )
                 else:
                     raise LiveTradingError(f"Unsupported client type: {type(client)}")
 
@@ -1661,6 +1676,11 @@ class PendingOrderWorker:
                     phases["limit_query"] = q
                     _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
                     _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
+                elif _is_hyperliquid_client(client):
+                    q = client.wait_for_fill(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=maker_wait_sec)
+                    phases["limit_query"] = q
+                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
+                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
 
                 remaining = max(0.0, float(amount or 0.0) - total_base)
 
@@ -1723,6 +1743,8 @@ class PendingOrderWorker:
                             phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid)
                         elif isinstance(client, HtxClient):
                             phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid)
+                        elif _is_hyperliquid_client(client):
+                            phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid, market_type=market_type)
                     except Exception:
                         pass
             except LiveTradingError as e:
@@ -1925,6 +1947,20 @@ class PendingOrderWorker:
                         pos_side=pos_side,
                         client_order_id=market_client_oid,
                     )
+                elif _is_hyperliquid_client(client):
+                    if market_type == "swap":
+                        try:
+                            client.set_leverage(symbol=str(symbol), leverage=leverage)
+                        except Exception:
+                            pass
+                    res2 = client.place_market_order(
+                        symbol=str(symbol),
+                        side="BUY" if side == "buy" else "SELL",
+                        qty=remaining,
+                        market_type=market_type,
+                        reduce_only=reduce_only,
+                        client_order_id=market_client_oid,
+                    )
                 else:
                     raise LiveTradingError(f"Unsupported client type: {type(client)}")
 
@@ -2005,6 +2041,11 @@ class PendingOrderWorker:
                     _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
                     _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
                 elif isinstance(client, HtxClient):
+                    q2 = client.wait_for_fill(symbol=str(symbol), order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=12.0)
+                    phases["market_query"] = q2
+                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
+                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
+                elif _is_hyperliquid_client(client):
                     q2 = client.wait_for_fill(symbol=str(symbol), order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=12.0)
                     phases["market_query"] = q2
                     _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))

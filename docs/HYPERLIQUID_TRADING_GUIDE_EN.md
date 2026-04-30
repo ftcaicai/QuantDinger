@@ -68,16 +68,16 @@ Build any IndicatorStrategy or ScriptStrategy and select your Hyperliquid creden
 - **Leverage**: set per-strategy. Hyperliquid will silently cap to the current tier maximum.
 - **Hedge mode**: not available. If you migrate a Binance dual-side strategy, evaluate the close logic carefully — buys against an existing short position will *net*, not open a new long.
 
-## Step 6 — Quick-trade (partial in v1)
+## Step 6 — Quick-trade (fully supported in v1)
 
 | Endpoint | Status | Notes |
 |----------|--------|-------|
 | `GET /api/quick-trade/balance` | ✓ Supported | Returns `{available, total, currency: "USDC"}` from `marginSummary.accountValue` + `withdrawable` |
 | `GET /api/quick-trade/position` | ✓ Supported | Flattens HL `[{position: {...}}]` into the same shape as other exchanges |
 | `POST /api/quick-trade/close-position` | ✓ Supported | Sends a reduce-only IOC order via `place_order_from_signal` |
-| `POST /api/quick-trade/place-order` (open position) | ✗ Returns 400 | USDT→qty reverse-calc + per-exchange filters not wired for HL — open via a Strategy |
+| `POST /api/quick-trade/place-order` (open position) | ✓ Supported | USDT amount → coin qty via HL's `get_ticker` (same flow as Binance/OKX) |
 
-The "panic close" use-case (manually flatten an open HL position from the QuantDinger UI) works in v1.
+Open + close + balance + position queries all behave like any other Crypto exchange.
 
 ## Limitations & gotchas
 
@@ -91,9 +91,8 @@ The "panic close" use-case (manually flatten an open HL position from the QuantD
 | Hedge mode | ✗ Not available on HL |
 | Hyperliquid as a top-level market type in the UI | ✗ Not a market — Hyperliquid is a **Crypto exchange** (peer of Binance / OKX). UI selects Crypto + binds an HL credential. |
 | `/api/market/symbols/search?market=Crypto&exchange_id=hyperliquid` | ✓ Returns Binance USDT pairs displayed as `BASE/USDC` (HL's quote convention). HL-exclusive tokens (HYPE, PURR) don't appear in v1; P2 will pull HL's own universe. |
-| Quick-trade balance / position / close-position | ✓ Supported |
-| Quick-trade place-order (open) | ✗ Returns 400 — open via Strategy |
-| Limit-first / maker order mode | ✗ Forced to market |
+| Quick-trade balance / position / close-position / place-order | ✓ Supported (all four) |
+| Limit-first / maker order mode | ✓ Supported (`order_mode=maker`/`limit_first` uses HL's ALO TIF) |
 | Strategy reduce-only auto-adjust to actual on-exchange position | ✓ Supported |
 | Backtest on HL-exclusive tokens (HYPE, PURR) | ✗ "Symbol not supported" |
 | WebSocket streams | ✗ REST polling only |

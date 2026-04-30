@@ -424,6 +424,140 @@ class HyperliquidClient(BaseSignedClient):
         )
         return _to_live_order_result(resp)
 
+    def place_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        qty: float = 0.0,
+        quantity: float = 0.0,
+        price: float,
+        market_type: str = "swap",
+        reduce_only: bool = False,
+        post_only: bool = False,
+        pos_side: str = "",   # accepted for parity; HL is one-way
+        client_order_id: Optional[str] = None,
+        **_: Any,
+    ) -> LiveOrderResult:
+        """Sit a limit order on the book.
+
+        ``post_only=True`` switches TIF to ``Alo`` (Add-Liquidity-Only); HL
+        will reject the order if it would otherwise cross the spread.
+        Mirrors ``BinanceFuturesClient.place_limit_order`` shape so the
+        ``pending_order_worker`` limit-first dispatch can call it uniformly.
+        """
+        amount = float(qty if qty else quantity)
+        resp = self.place_order(
+            symbol=symbol,
+            side=side,
+            qty=amount,
+            order_type="LIMIT",
+            price=price,
+            time_in_force="Alo" if post_only else "Gtc",
+            reduce_only=reduce_only,
+            market_type=market_type,
+            client_order_id=client_order_id,
+        )
+        return _to_live_order_result(resp)
+
+    def wait_for_fill(
+        self,
+        *,
+        symbol: str = "",
+        order_id: str = "",
+        client_order_id: str = "",
+        max_wait_sec: float = 3.0,
+        poll_interval_sec: float = 0.5,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        """Poll order status + user fills until terminal or timeout.
+
+        Returns the same shape as other adapters' ``wait_for_fill``:
+            ``{"filled", "avg_price", "fee", "fee_ccy", "status", "order"}``.
+
+        HL fee is denominated in USDC (perps and spot both clear in USDC).
+        """
+        empty = {
+            "filled": 0.0,
+            "avg_price": 0.0,
+            "fee": 0.0,
+            "fee_ccy": "USDC",
+            "status": "unknown",
+            "order": {},
+        }
+        if not order_id:
+            return empty
+        try:
+            oid = int(order_id)
+        except Exception:
+            return empty
+
+        end_ts = time.time() + float(max_wait_sec or 0.0)
+        last_order: Dict[str, Any] = {}
+
+        while True:
+            try:
+                q = self._info.query_order_by_oid(self.account_address, oid)
+            except Exception as e:
+                logger.debug(f"Hyperliquid query_order_by_oid({oid}) failed: {e}")
+                q = {}
+
+            inner_order = {}
+            status = ""
+            if isinstance(q, dict):
+                # SDK wraps response as {"status": "order", "order": {"order": {...}, "status": "..."}}.
+                if isinstance(q.get("order"), dict):
+                    inner = q["order"]
+                    inner_order = inner.get("order") if isinstance(inner.get("order"), dict) else inner
+                    status = str(inner.get("status") or "")
+            if isinstance(inner_order, dict) and inner_order:
+                last_order = inner_order
+
+            terminal = status.lower() in ("filled", "canceled", "cancelled", "rejected", "margincanceled")
+            timed_out = time.time() >= end_ts
+
+            if terminal or timed_out:
+                # Sum fills for this oid from user_fills (best-effort)
+                filled_sz = 0.0
+                weighted_px = 0.0
+                fee_total = 0.0
+                try:
+                    fills = self._info.user_fills(self.account_address) or []
+                except Exception as e:
+                    logger.debug(f"Hyperliquid user_fills failed: {e}")
+                    fills = []
+                for f in fills if isinstance(fills, list) else []:
+                    if not isinstance(f, dict):
+                        continue
+                    try:
+                        if int(f.get("oid") or -1) != oid:
+                            continue
+                    except Exception:
+                        continue
+                    try:
+                        sz = float(f.get("sz") or 0)
+                        px = float(f.get("px") or 0)
+                    except Exception:
+                        sz, px = 0.0, 0.0
+                    if sz > 0 and px > 0:
+                        filled_sz += sz
+                        weighted_px += sz * px
+                    try:
+                        fee_total += abs(float(f.get("fee") or 0))
+                    except Exception:
+                        pass
+                avg_price = (weighted_px / filled_sz) if filled_sz > 0 else 0.0
+                return {
+                    "filled": filled_sz,
+                    "avg_price": avg_price,
+                    "fee": fee_total,
+                    "fee_ccy": "USDC",
+                    "status": status or ("timeout" if timed_out else "unknown"),
+                    "order": last_order,
+                }
+
+            time.sleep(float(poll_interval_sec or 0.5))
+
     def cancel_order(
         self,
         *,

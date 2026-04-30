@@ -19,8 +19,8 @@ import pytest
 from app.routes.quick_trade import (
     _parse_balance,
     _parse_positions,
-    _reject_quick_trade_open_if_hyperliquid,
     _fetch_exchange_positions_raw,
+    _limit_order_kwargs,
 )
 
 
@@ -158,21 +158,29 @@ def test_parse_positions_understands_hl_flattened_shape(monkeypatch):
     assert p["leverage"] == pytest.approx(10)
 
 
-# ---- HL gate (open-only) ---------------------------------------------------
+# ---- HL is now first-class on /place-order (no open-position gate) -------
 
-def test_open_position_still_rejects_hl(app):
-    """Open via Quick-Trade is intentionally still 400 in v1."""
-    with app.app_context():
-        out = _reject_quick_trade_open_if_hyperliquid("hyperliquid")
-        assert out is not None
-        resp, status = out
-        assert status == 400
-        body = resp.get_json()
-        assert body["code"] == 0
-        assert "Hyperliquid" in body["msg"]
+def test_limit_order_kwargs_for_hl(monkeypatch):
+    """``_limit_order_kwargs`` should produce HL-compatible kwargs (qty +
+    market_type + price), not fall through to the generic ``size``-based
+    fallback."""
+    fake_client = _FakeHL([])
+    _install_hl_class(monkeypatch, _FakeHL)
 
-
-def test_open_position_pass_through_for_other_exchanges(app):
-    with app.app_context():
-        assert _reject_quick_trade_open_if_hyperliquid("binance") is None
-        assert _reject_quick_trade_open_if_hyperliquid("") is None
+    kwargs = _limit_order_kwargs(
+        client=fake_client,
+        symbol="BTC",
+        amount=0.1,
+        price=60000.0,
+        side="buy",
+        market_type="swap",
+        client_order_id="qt123",
+    )
+    # HL's place_limit_order signature: qty + price + market_type + client_order_id
+    assert kwargs == {
+        "qty": 0.1,
+        "price": 60000.0,
+        "market_type": "swap",
+        "client_order_id": "qt123",
+    }
+    assert "size" not in kwargs  # would have been the generic fallback shape

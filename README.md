@@ -5,21 +5,36 @@
 
   <h1>QuantDinger</h1>
   <h3>Your Private AI Quant Operating System</h3>
-  <p><strong>Research markets, generate Python strategies, backtest ideas, and run live trading workflows on infrastructure you control.</strong></p>
-  <p><em>Self-hosted AI trading platform for quant research, backtesting, execution, and operator-ready growth.</em></p>
+  <p><strong>One deployable stack for charting, AI market research, Python indicators &amp; strategies, backtests, and live execution—on your own servers and your own keys.</strong></p>
+  <p><em>Self-hosted quantitative platform: from idea and AI-assisted coding to paper-style workflows and exchange-connected live trading, with optional multi-user and billing primitives for operators.</em></p>
 
-  <p>
-    <a href="README.md"><strong>English</strong></a> &nbsp;·&nbsp;
-    <a href="docs/README_CN.md"><strong>简体中文</strong></a> &nbsp;·&nbsp;
-    <a href="https://ai.quantdinger.com"><strong>Live Demo</strong></a> &nbsp;·&nbsp;
-    <a href="https://www.youtube.com/watch?v=tNAZ9uMiUUw"><strong>Video Demo</strong></a> &nbsp;·&nbsp;
-    <a href="https://www.quantdinger.com"><strong>Website</strong></a> &nbsp;·&nbsp;
-    <a href="https://t.me/quantdinger"><strong>Telegram</strong></a> &nbsp;·&nbsp;
-    <a href="https://discord.com/invite/tyx5B6TChr"><strong>Discord</strong></a> &nbsp;·&nbsp;
-    <a href="https://youtube.com/@quantdinger"><strong>YouTube</strong></a>
-  </p>
+  <div align="center" style="max-width: 680px; margin: 1.25rem auto 0; padding: 20px 22px 22px; border: 1px solid #d1d9e0; border-radius: 16px;">
+    <p style="margin: 0 0 14px; line-height: 1.65;">
+      <a href="README.md"><strong>English</strong></a>
+      <span style="color: #afb8c1;"> · </span>
+      <a href="docs/README_CN.md"><strong>简体中文</strong></a>
+    </p>
+    <p style="margin: 0 0 18px; padding-bottom: 16px; border-bottom: 1px solid #eaeef2; line-height: 2;">
+      <a href="https://ai.quantdinger.com"><strong>SaaS</strong></a>
+      <span style="color: #d8dee4;"> &nbsp;·&nbsp; </span>
+      <a href="https://www.youtube.com/watch?v=tNAZ9uMiUUw"><strong>Video Demo</strong></a>
+      <span style="color: #d8dee4;"> &nbsp;·&nbsp; </span>
+      <a href="https://www.quantdinger.com"><strong>Website</strong></a>
+      <span style="color: #d8dee4;"> &nbsp;·&nbsp; </span>
+      <a href="https://aws.amazon.com/marketplace/pp/prodview-naanrb7d2mbc6"><strong>AWS Marketplace</strong></a>
+    </p>
+    <p style="margin: 0; line-height: 2;">
+      <a href="https://t.me/quantdinger"><img src="https://img.shields.io/badge/Telegram-Join-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram"></a>
+      &nbsp;
+      <a href="https://discord.com/invite/tyx5B6TChr"><img src="https://img.shields.io/badge/Discord-Server-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
+      &nbsp;
+      <a href="https://youtube.com/@quantdinger"><img src="https://img.shields.io/badge/YouTube-%40quantdinger-FF0000?style=flat-square&logo=youtube&logoColor=white" alt="YouTube"></a>
+      &nbsp;
+      <a href="https://x.com/QuantDinger_EN"><img src="https://img.shields.io/badge/X-%40QuantDinger_EN-000000?style=flat-square&logo=x&logoColor=white" alt="X"></a>
+    </p>
+  </div>
 
-  <p>
+  <p style="margin-top: 1.45rem; margin-bottom: 10px;">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square&logo=apache" alt="License"></a>
     <img src="https://img.shields.io/badge/Version-3.0.3-orange?style=flat-square" alt="Version">
     <img src="https://img.shields.io/badge/Python-3.10%2B%20%7C%20Docker%20image%203.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
@@ -27,38 +42,166 @@
     <img src="https://img.shields.io/badge/Frontend-Prebuilt-1f8b4c?style=flat-square" alt="Frontend">
     <img src="https://img.shields.io/github/stars/brokermr810/QuantDinger?style=flat-square&logo=github" alt="Stars">
   </p>
+  <p style="margin: 10px 0 12px;">
+    <a href="https://aws.amazon.com/marketplace/pp/prodview-naanrb7d2mbc6"><img src="https://img.shields.io/badge/AWS%20Marketplace-AMI%20%7C%20CentOS%209-232F3E?style=flat-square&logo=amazonaws&logoColor=white" alt="QuantDinger on AWS Marketplace (ThinkCloud AMI)"></a>
+  </p>
+  <p style="margin: 12px 0 10px;">
+    <a href="https://oosmetrics.com/repo/brokermr810/QuantDinger"><img src="https://api.oosmetrics.com/api/v1/badge/achievement/4991ab54-52d2-46d4-a03a-67b47b61ae4b.svg" alt="oosmetrics — Top 7 in Training by acceleration (2026-04-25)"></a>
+  </p>
+  <p style="margin-top: 14px;">
+    <a href="https://www.producthunt.com/products/quantdinger/launches/quantdinger?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-quantdinger" target="_blank" rel="noopener noreferrer"><img alt="QuantDinger - A local-first, open-source AI quant trading workspace | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1057439&amp;theme=light&amp;t=1777556016131"></a>
+  </p>
 </div>
 
 ---
 
-> QuantDinger is a **self-hosted, local-first quantitative trading and algorithmic trading platform** for **AI research, Python strategy generation, backtesting, and live execution**.
+> QuantDinger is a **self-hosted, local-first** quantitative platform: **AI-assisted research**, **Python-native strategies**, **backtesting**, and **live trading** (crypto, IBKR stocks, MT5 forex) in one product—not a loose collection of scripts and SaaS tabs.
 
-## Try in 2 Minutes
+<div align="center">
+  <img src="docs/screenshots/architecture.png" alt="QuantDinger system architecture: Data Sources → Indicator / Signal / Strategy / Backtesting / AI Analysis layers → Execution, with the closed-loop quant workflow (Idea → Indicator → Strategy → Backtest → Optimize → Execute → Monitor)" width="960">
+  <p><sub><em>End-to-end architecture: market data feeds the five-layer engine and exits to live execution, closing the quant loop from idea to monitoring.</em></sub></p>
+</div>
 
-**Fastest way to try QuantDinger locally:**
+## Try in 2 minutes
+
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) with Compose (Docker Desktop on Windows/macOS, or Docker Engine + Compose plugin on Linux), and **Git**. Node.js is **not** required (prebuilt UI is in `frontend/dist`).
+
+### macOS / Linux (Bash)
+
+One line (or run the same steps separately):
 
 ```bash
-git clone https://github.com/brokermr810/QuantDinger.git && cd QuantDinger && cp backend_api_python/env.example backend_api_python/.env && ./scripts/generate-secret-key.sh && docker-compose up -d --build
+git clone https://github.com/brokermr810/QuantDinger.git && cd QuantDinger && cp backend_api_python/env.example backend_api_python/.env && chmod +x scripts/generate-secret-key.sh && ./scripts/generate-secret-key.sh && docker-compose up -d --build
 ```
 
-Then open:
+If `./scripts/generate-secret-key.sh` fails with “Permission denied”, run `chmod +x scripts/generate-secret-key.sh` and retry. If `docker-compose` is not found, try `docker compose` (Compose V2).
 
-- `http://localhost:8888`
-- login with `quantdinger` / `123456`
-- read `backend_api_python/.env` before production use
+### Windows (PowerShell)
 
-## What Is QuantDinger?
+Use **PowerShell** (not CMD) in a folder where you want the project. **Docker Desktop** must be running (WSL2 backend recommended).
 
-QuantDinger is a **self-hosted AI trading platform** and **quant research workspace** for teams and operators who want one system for:
+```powershell
+git clone https://github.com/brokermr810/QuantDinger.git
+Set-Location QuantDinger
+Copy-Item backend_api_python\env.example -Destination backend_api_python\.env
+$key = & python -c "import secrets; print(secrets.token_hex(32))" 2>$null
+if (-not $key) { $key = & py -c "import secrets; print(secrets.token_hex(32))" 2>$null }
+if (-not $key) { $key = & python3 -c "import secrets; print(secrets.token_hex(32))" 2>$null }
+if (-not $key) { Write-Error "Install Python 3 from python.org (tick 'Add to PATH') or use Git Bash with the macOS/Linux block above." }
+(Get-Content backend_api_python\.env) -replace '^SECRET_KEY=.*$', "SECRET_KEY=$key" | Set-Content backend_api_python\.env -Encoding utf8
+docker-compose up -d --build
+```
 
-- AI market analysis
-- Python indicator and strategy development
-- backtesting and strategy persistence
-- live trading execution
-- portfolio monitoring and alerts
-- multi-user operations, billing, and commercialization
+If `docker-compose` is not recognized, use **`docker compose`** (space, no hyphen). If Git is missing, install [Git for Windows](https://git-scm.com/download/win).
 
-If you are searching for an **open source quant platform**, **AI trading research stack**, **self-hosted backtesting system**, or **natural-language-to-Python strategy workflow**, this is what QuantDinger is built for.
+### Windows alternative: Git Bash
+
+If you installed **Git for Windows**, open **Git Bash** and you can use the **macOS / Linux** one-liner above (Bash + `chmod` + `./scripts/generate-secret-key.sh`).
+
+---
+
+Then open **`http://localhost:8888`**, sign in with **`quantdinger` / `123456`**, and **change the default admin password** before any real use. For prerequisites, configuration details, first-run checks, and troubleshooting, continue to **[Installation & first-time setup](#installation--first-time-setup-docker-compose)** below.
+
+## Use it from an AI agent (Cursor / Claude Code / Codex / MCP)
+
+QuantDinger ships an **Agent Gateway** at `/api/agent/v1` and a small **MCP server** that wraps it as Model Context Protocol tools. Once you sign in once and issue a token, your AI client can read markets, manage strategies, run backtests, and (paper-only by default) place trades — without ever seeing your exchange keys or your admin JWT.
+
+> Two safety properties are non-negotiable: every agent call is **audit-logged**, and trading-class tokens are **paper-only by default**. Live execution requires both `paper_only=false` on the token AND `AGENT_LIVE_TRADING_ENABLED=true` on the server.
+
+### Step 1 — Get an agent token (two paths, your choice)
+
+The MCP client and the wiring in Step 2 are **identical** for both paths — only the value of `QUANTDINGER_BASE_URL` changes.
+
+**Path A · Hosted ([ai.quantdinger.com](https://ai.quantdinger.com)) — try it in 30 seconds.** Sign up → open **Sidebar → Agent Tokens** → **Issue Token**. The hosted instance is locked to `paper_only=true` and the **T** (Trading) scope is rejected at issuance — agents can read markets, manage strategies in your tenant, and run backtests, but never route real-money orders. Set `QUANTDINGER_BASE_URL=https://ai.quantdinger.com`. Best for: trying QuantDinger from Cursor / Claude Code without installing anything; demos; research notebooks against shared datasets.
+
+**Path B · Self-hosted (this repo) — production / private data / live trading.** After the [Try in 2 minutes](#try-in-2-minutes) Docker bring-up, log in as admin and open **Sidebar → Agent Tokens** (or `http://localhost:8888/#/agent-tokens`). You decide scopes (incl. **T**), market/instrument allowlists, rate limits, and whether `AGENT_LIVE_TRADING_ENABLED=true` is ever flipped. Set `QUANTDINGER_BASE_URL=http://localhost:8888` (or your LAN URL). Best for: anyone with their own exchange keys, anyone with private strategies/data, teams behind a VPN, or anyone who eventually wants live execution.
+
+In either path:
+
+1. Click **Issue Token** → name it (`cursor-mcp`, `claude-research`, …).
+2. Pick scopes — start with **R + B** (read + backtest); add **W** to let the agent create/edit strategies.
+3. Copy the token **once** — the dialog shows the full string once; the server only keeps a SHA-256 hash.
+
+Prefer the CLI? See [`docs/agent/AGENT_QUICKSTART.md`](docs/agent/AGENT_QUICKSTART.md) for the equivalent `curl`.
+
+### Step 2 — Wire the MCP server into your AI client
+
+The MCP server lives in [`mcp_server/`](mcp_server/). Two transports work everywhere:
+
+**A. Local stdio (Cursor, Claude Code, Codex desktop, etc.)** — the server is published on PyPI as [`quantdinger-mcp`](https://pypi.org/project/quantdinger-mcp/). Drop this into `.cursor/mcp.json`, `~/.config/claude/claude_desktop_config.json`, or your client's equivalent (template: [`docs/agent/cursor-mcp.example.json`](docs/agent/cursor-mcp.example.json)):
+
+```json
+{
+  "mcpServers": {
+    "quantdinger": {
+      "command": "uvx",
+      "args": ["quantdinger-mcp"],
+      "env": {
+        "QUANTDINGER_BASE_URL":    "http://localhost:8888",
+        "QUANTDINGER_AGENT_TOKEN": "qd_agent_xxxxxxxx"
+      }
+    }
+  }
+}
+```
+
+`uvx` ([install uv](https://docs.astral.sh/uv/getting-started/installation/)) downloads + caches the package on first run; no virtualenv setup. If you prefer pip:
+
+```bash
+pip install quantdinger-mcp
+# then use {"command": "quantdinger-mcp", "args": []}
+```
+
+For Claude Code's CLI helper:
+
+```bash
+claude mcp add quantdinger \
+  --env QUANTDINGER_BASE_URL=http://localhost:8888 \
+  --env QUANTDINGER_AGENT_TOKEN=qd_agent_xxxxxxxx \
+  -- uvx quantdinger-mcp
+```
+
+**B. Remote HTTP (cloud agents like OpenClaw / NanoBot, browser IDEs, anything that can't spawn subprocesses)** — run the MCP server as a long-lived service, then point clients at the URL:
+
+```bash
+QUANTDINGER_BASE_URL=https://your-host \
+QUANTDINGER_AGENT_TOKEN=qd_agent_xxxxxxxx \
+QUANTDINGER_MCP_TRANSPORT=streamable-http \
+QUANTDINGER_MCP_HOST=0.0.0.0 \
+QUANTDINGER_MCP_PORT=7800 \
+quantdinger-mcp
+# clients connect to http://your-host:7800
+```
+
+Use `QUANTDINGER_MCP_TRANSPORT=sse` instead for clients that only speak the older SSE transport. Put a reverse proxy in front for TLS and IP allowlisting.
+
+### Step 3 — Talk to your agent
+
+Restart the IDE, then ask things like:
+
+- *"Pull the last 90 daily candles for BTC/USDT and tell me what the regime detector says."*
+- *"Backtest the 20/60 SMA crossover on ETH/USDT 4h between 2024-01-01 and 2024-06-30 and stream the result as it runs."*
+- *"Create a strategy named **eth-trend-bot**, use the indicator I just designed, leave it in `stopped` state."*
+
+Long-running jobs (`/api/agent/v1/jobs/{id}/stream`) are exposed as SSE so the agent can react to partial results without polling. Every call shows up under **Agent Tokens → Audit log** with route, scope class, status code, and duration.
+
+### Want to use QuantDinger as a *coding* agent context too?
+
+If you're editing this repo with Cursor / Claude Code / Codex, the repo also ships a Cursor Skill at [`.cursor/skills/quantdinger-agent-workflow/SKILL.md`](.cursor/skills/quantdinger-agent-workflow/SKILL.md) that explains the Agent Gateway internals, red lines (no real keys, paper-only by default), and where to verify changes. Read [`docs/agent/AGENT_ENVIRONMENT_DESIGN.md`](docs/agent/AGENT_ENVIRONMENT_DESIGN.md) for the full layered-contracts model.
+
+Deeper links: [AI Integration design](docs/agent/AI_INTEGRATION_DESIGN.md) · [Quickstart with `curl`](docs/agent/AGENT_QUICKSTART.md) · [OpenAPI 3.0 spec](docs/agent/agent-openapi.json) · [MCP server README](mcp_server/README.md)
+
+## What is QuantDinger?
+
+QuantDinger is built for people who want **one controlled environment** instead of stitching together chart apps, Jupyter, bots, and dashboards:
+
+- **Research**: AI-driven analysis, watchlists, and multi-market context (crypto, equities, forex, optional prediction-market workflows).
+- **Build**: Indicator-style (`IndicatorStrategy`) and script-style (`ScriptStrategy`) Python; optional natural-language → code to bootstrap.
+- **Validate**: Server-side backtests, metrics, and equity curves tied to the same strategy model you iterate in the UI.
+- **Operate**: Live strategies, quick trade, notifications, and execution adapters—credentials stay in **your** Postgres-backed vault and `.env`.
+- **Grow (optional)**: Multi-user patterns, credits, memberships, and USDT billing hooks for teams that ship a product, not only a personal bot.
+
+If you are looking for an **open-source quant stack**, **self-hosted AI trading workspace**, or **NL → Python strategy workflow** with a real operator surface, this repository is the integration point.
 
 ## Why QuantDinger? AI-Powered Quantitative Trading and Backtesting
 
@@ -106,12 +249,12 @@ QuantDinger gives you something most trading tools do not:
 <table align="center" width="100%">
   <tr>
     <td colspan="2" align="center">
-      <a href="https://www.youtube.com/watch?v=tNAZ9uMiUUw">
+      <a href="https://www.youtube.com/watch?v=wHIvvv6fmHA">
         <img src="docs/screenshots/video_demo.png" alt="Video Demo" width="80%" style="border-radius: 12px;">
       </a>
       <br/>
       <sub>
-        <a href="https://www.youtube.com/watch?v=tNAZ9uMiUUw">
+        <a href="https://www.youtube.com/watch?v=wHIvvv6fmHA">
           <strong>▶ Watch Product Demo on YouTube</strong>
         </a>
       </sub>
@@ -320,21 +463,78 @@ flowchart LR
     API --> NOTIFY
 ```
 
-## Quick Start
+## Installation & first-time setup (Docker Compose)
 
-> Requirement: install [Docker](https://docs.docker.com/get-docker/). Node.js is not required for deployment because this repository already includes the prebuilt frontend in `frontend/dist`.
+This section mirrors a typical “local deploy” path: **prepare the host → obtain the code → configure secrets → start the stack → verify → harden → optionally wire AI**. Node.js is **not** required: the repo ships a **prebuilt** UI under `frontend/dist` and Nginx serves it inside the `frontend` container.
 
-### Linux / macOS
+### Prerequisites
+
+| Item | Notes |
+|------|--------|
+| [Docker](https://docs.docker.com/get-docker/) + Docker Compose v2 | Used for Postgres, Redis, API, and static UI. |
+| `git` | To clone this repository. |
+| Ports (defaults) | `8888` (web), `5000` (API, bound to **127.0.0.1**), `5432` / `6379` (DB/Redis, loopback by default). Change via root `.env` if they collide. |
+| Disk | Postgres volume grows with users, strategies, and logs; plan a few GB minimum for serious use. |
+
+### 1) Clone the repository
 
 ```bash
 git clone https://github.com/brokermr810/QuantDinger.git
 cd QuantDinger
+```
+
+### 2) Create backend configuration (mandatory)
+
+```bash
 cp backend_api_python/env.example backend_api_python/.env
+```
+
+Almost all runtime behavior is driven by **`backend_api_python/.env`** (database URL, admin user, LLM keys, workers, billing toggles, etc.). The optional **repository root** `.env` only adjusts Compose-level concerns such as **ports** and **image mirrors** (`IMAGE_PREFIX`).
+
+### 3) Set `SECRET_KEY` before the first boot (mandatory)
+
+The API **refuses to start** if `SECRET_KEY` is still the placeholder from `env.example`. This blocks accidental insecure deployments.
+
+**Linux / macOS** (recommended):
+
+```bash
 ./scripts/generate-secret-key.sh
+```
+
+The script overwrites the `SECRET_KEY=` line in `backend_api_python/.env` using Python’s `secrets` module.
+
+**Manual** (any OS): generate a long random string (for example 64 hex chars) and set `SECRET_KEY=...` in `backend_api_python/.env`.
+
+### 4) Start the stack
+
+```bash
 docker-compose up -d --build
 ```
 
-### Windows PowerShell
+Services: **`postgres`**, **`redis`**, **`backend`**, **`frontend`** (see `docker-compose.yml` for healthchecks and port mappings).
+
+### 5) Verify and sign in
+
+| Check | URL / command |
+|--------|----------------|
+| Web UI | `http://localhost:8888` (override host/port with `FRONTEND_HOST` / `FRONTEND_PORT` in root `.env` if needed). |
+| API health | `http://localhost:5000/api/health` |
+| Logs | `docker-compose logs -f backend` |
+
+Default admin (change immediately in production):
+
+- **User**: `quantdinger`
+- **Password**: `123456` (from `env.example`; override with `ADMIN_USER` / `ADMIN_PASSWORD` in `.env` before first use if you prefer).
+
+Also set **`FRONTEND_URL`** in `backend_api_python/.env` to the URL users actually use (including `https://` behind a reverse proxy); it affects redirects, CORS-related settings, and some generated links.
+
+### 6) Optional: enable AI features
+
+AI analysis, NL→code, and related flows need at least one LLM provider configured. Open `backend_api_python/env.example`, find the **AI / LLM** block, copy the relevant keys into your `.env` (for example `LLM_PROVIDER` + `OPENROUTER_API_KEY`, or another supported provider). Restart the backend after edits.
+
+### 7) Windows notes
+
+Use **Docker Desktop** (WSL2 backend recommended). From PowerShell in the repo root:
 
 ```powershell
 git clone https://github.com/brokermr810/QuantDinger.git
@@ -345,20 +545,18 @@ $key = py -c "import secrets; print(secrets.token_hex(32))"
 docker-compose up -d --build
 ```
 
-After startup:
+If `py` is not on PATH, use `python` or `python3` in the one-liner that generates `$key`. Line endings should remain UTF-8; avoid editors that strip newlines from `.env`.
 
-- Frontend: `http://localhost:8888`
-- Backend health check: `http://localhost:5000/api/health`
-- Default login: `quantdinger` / `123456`
+### Troubleshooting (first boot)
 
-Important deployment notes:
+| Symptom | What to check |
+|---------|----------------|
+| Backend exits immediately | `SECRET_KEY` still default, or invalid `.env` syntax. Read `docker-compose logs backend`. |
+| Blank page or API errors from browser | `FRONTEND_URL` / origins mismatch; API not reachable from the host you opened. |
+| Port already in use | Another Postgres, Redis, or local service on `5432` / `6379` / `5000` / `8888`. Adjust variables in root `.env` per `docker-compose.yml`. |
+| Many live strategies, “start denied” | Raise `STRATEGY_MAX_THREADS` in `backend_api_python/.env` and restart API (see comments in `env.example`). |
 
-- The backend container will **not start** if `SECRET_KEY` still uses the default value.
-- The main application config lives in `backend_api_python/.env`.
-- Root `.env` is optional and is mainly used for image mirrors or custom ports.
-- The default stack includes `frontend`, `backend`, `postgres`, and `redis`.
-
-### Common Docker Commands
+### Common Docker commands
 
 ```bash
 docker-compose ps
@@ -368,15 +566,21 @@ docker-compose up -d --build
 docker-compose down
 ```
 
-### Optional Root `.env`
+### Optional root `.env` (Compose only)
 
-If you need custom ports or image mirrors, create a root `.env`:
+For **custom ports** or **mirror/prefix** for base images (slow Docker Hub pulls), create a file named `.env` in the **repository root** (same directory as `docker-compose.yml`):
 
 ```ini
 FRONTEND_PORT=3000
 BACKEND_PORT=127.0.0.1:5001
 IMAGE_PREFIX=docker.m.daocloud.io/library/
 ```
+
+Production-style TLS, domain, and reverse-proxy placement are covered in **[Cloud deployment](docs/CLOUD_DEPLOYMENT_EN.md)**.
+
+### Suggested first session (product walkthrough)
+
+After the stack is healthy: (1) run an **AI asset / market analysis** so LLM and data paths are verified; (2) open the **Indicator IDE**, load a symbol, and run a **signal backtest** on a small date range; (3) optionally use **AI code generation** to draft an indicator, then edit the Python; (4) when ready, attach **exchange API keys** (profile / credentials), use **test connection**, then explore **live strategy** or **quick trade** with execution mode you intend. This order surfaces configuration issues early before real capital.
 
 ## Minimal Example: Python Indicator Strategy
 
@@ -512,6 +716,10 @@ Use `backend_api_python/env.example` as the primary template. Key areas include:
 | [Chinese Overview](docs/README_CN.md) | Chinese product overview |
 | [Multi-User Setup](docs/multi-user-setup.md) | PostgreSQL multi-user deployment |
 | [Cloud Deployment](docs/CLOUD_DEPLOYMENT_EN.md) | Domain, HTTPS, reverse proxy, and cloud rollout |
+| [Multi-agent environment design](docs/agent/AGENT_ENVIRONMENT_DESIGN.md) | How to structure the repo for Cursor, Claude Code, Codex, and similar coding agents (English) |
+| [AI / Agent integration design](docs/agent/AI_INTEGRATION_DESIGN.md) | Versioned Agent Gateway, scopes, MCP, and trading safety so QuantDinger can serve AI agents — not only humans (English) |
+| [Agent quickstart](docs/agent/AGENT_QUICKSTART.md) | Issue a token, call `/api/agent/v1`, run paper trades, integrate via MCP (English) |
+| [Agent OpenAPI](docs/agent/agent-openapi.json) | Machine-readable contract for the Agent Gateway |
 
 ### Strategy Development
 
@@ -604,8 +812,8 @@ For commercial licensing, frontend source access, branding authorization, or dep
 
 ## Start Here
 
-- **Want to see the product first?** Open the [Live Demo](https://ai.quantdinger.com) or watch the [Video Demo](https://www.youtube.com/watch?v=tNAZ9uMiUUw).
-- **Want to self-host quickly?** Go straight to [Quick Start](#quick-start) and launch with Docker Compose.
+- **Want to see the product first?** Open the [official SaaS](https://ai.quantdinger.com) or watch the [Video Demo](https://www.youtube.com/watch?v=tNAZ9uMiUUw).
+- **Want to self-host quickly?** Use [Try in 2 minutes](#try-in-2-minutes) for a one-liner, then follow [Installation & first-time setup](#installation--first-time-setup-docker-compose) for the full checklist.
 - **Want to build strategies?** Read the [Strategy Development Guide](docs/STRATEGY_DEV_GUIDE.md). Example scripts live in [`docs/examples/`](docs/examples/) and are kept aligned with the guide.
 - **Want cloud or production deployment?** Use the [Cloud Deployment Guide](docs/CLOUD_DEPLOYMENT_EN.md).
 - **Want to license or customize it for a business?** Contact the team through [quantdinger.com](https://quantdinger.com).
@@ -619,6 +827,7 @@ For commercial licensing, frontend source access, branding authorization, or dep
 </p>
 
 - [Contributing Guide](CONTRIBUTING.md)
+- [Contributors](CONTRIBUTORS.md)
 - [Report Bugs / Request Features](https://github.com/brokermr810/QuantDinger/issues)
 - Email: [support@quantdinger.com](mailto:support@quantdinger.com)
 

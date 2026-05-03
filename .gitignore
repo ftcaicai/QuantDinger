@@ -66,6 +66,12 @@ yarn.lock
 backend_api_python/logs/
 # Vue build output belongs in frontend/dist/, not under the API package
 backend_api_python/dist/
+
+# MCP server build artifacts (PyPI release output, never committed)
+mcp_server/dist/
+mcp_server/build/
+mcp_server/.smoketest/
+mcp_server/src/quantdinger_mcp.egg-info/
 backend_api_python/data/quantdinger.db
 backend_api_python/data/memory/
 

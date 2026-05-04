@@ -187,10 +187,9 @@ class LLMService:
         """Call OpenAI-compatible API (OpenAI, DeepSeek, Grok, OpenRouter)."""
         url = f"{base_url}/chat/completions"
         
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if (api_key or "").strip():
+            headers["Authorization"] = f"Bearer {api_key.strip()}"
         
         # OpenRouter specific headers
         if "openrouter" in base_url:
@@ -408,11 +407,19 @@ class LLMService:
                 explicit_provider = LLMProvider(explicit_provider_name)
             except ValueError:
                 explicit_provider = None
-        api_key = self.get_api_key(p)
-        
-        if not api_key:
+        api_key = (self.get_api_key(p) or "").strip()
+        base_url = (self.get_base_url(p) or "").strip()
+        # Local OpenAI-compatible servers (e.g. Ollama) often use no API key when base_url is set.
+        custom_ok_without_key = p == LLMProvider.CUSTOM and bool(base_url)
+
+        if not api_key and not custom_ok_without_key:
             # If provider is explicitly configured by user, don't silently switch.
             if explicit_provider is not None and p == explicit_provider:
+                if p == LLMProvider.CUSTOM:
+                    raise ValueError(
+                        "已选择自定义 OpenAI 兼容接口：请配置 CUSTOM_API_URL（例如本机 Ollama："
+                        "http://127.0.0.1:11434/v1）。本地 Ollama 通常无需填写 API Key。"
+                    )
                 raise ValueError(
                     f"API key not configured for explicit provider: {p.value}. "
                     f"Please set {p.value.upper()}_API_KEY in settings."
@@ -423,14 +430,15 @@ class LLMService:
                     if alt_provider != p and self.get_api_key(alt_provider):
                         logger.warning(f"No API key for {p.value}, switching to {alt_provider.value}")
                         p = alt_provider
-                        api_key = self.get_api_key(p)
+                        api_key = (self.get_api_key(p) or "").strip()
+                        base_url = (self.get_base_url(p) or "").strip()
+                        custom_ok_without_key = p == LLMProvider.CUSTOM and bool(base_url)
                         break
             
-            if not api_key:
+            if not api_key and not custom_ok_without_key:
                 raise ValueError(f"API key not configured for provider: {p.value}. Please configure at least one LLM provider API key.")
-        
-        base_url = self.get_base_url(p)
-        if p == LLMProvider.CUSTOM and not (base_url or "").strip():
+
+        if p == LLMProvider.CUSTOM and not base_url:
             raise ValueError(
                 "Custom LLM base URL 未配置：请在后台设置或 .env 中填写 CUSTOM_API_URL "
                 "（须为 OpenAI 兼容网关的根地址，例如 https://api.example.com/v1）。"

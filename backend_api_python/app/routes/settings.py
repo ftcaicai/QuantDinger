@@ -279,7 +279,7 @@ CONFIG_SCHEMA = {
                 'label': 'Custom API Key',
                 'type': 'password',
                 'required': False,
-                'description': 'API key for your custom endpoint',
+                'description': 'API key for your custom endpoint. Leave empty for local OpenAI-compatible servers without auth (e.g. Ollama on localhost)',
                 'group': 'custom'
             },
             {

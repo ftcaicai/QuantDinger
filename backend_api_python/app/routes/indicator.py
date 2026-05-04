@@ -869,6 +869,15 @@ Return **only** valid Python source: **no** markdown fences, **no** ` ``` `, **n
             f"my_indicator_description = \"{(prompt or '').replace('\n', ' ')[:200]}\"\n\n"
         )
         body = (
+            "# ===== Strategy defaults (single source of truth) =====\n"
+            "# @strategy stopLossPct 0.03            # Hard stop-loss (3%)\n"
+            "# @strategy takeProfitPct 0.06          # Take-profit (6%)\n"
+            "# @strategy entryPct 1.0                # Use 100% of available capital per entry\n"
+            "# @strategy trailingEnabled false       # Set true to enable trailing stop\n"
+            "# @strategy trailingStopPct 0.02        # Trailing distance (2%)\n"
+            "# @strategy trailingActivationPct 0.03  # Activate trailing after +3% in profit\n"
+            "# @strategy tradeDirection long         # long | short | both\n\n"
+            "# ===== Indicator parameters =====\n"
             "# @param rsi_len int 14 RSI period\n\n"
             "rsi_len = params.get('rsi_len', 14)\n"
             "df = df.copy()\n\n"

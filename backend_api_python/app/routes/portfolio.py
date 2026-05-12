@@ -51,21 +51,24 @@ def _now_ts() -> int:
 
 
 def _serialize_monitor_ts(value):
+    """Serialize a TIMESTAMP value for the frontend.
+
+    DB columns are ``TIMESTAMP WITHOUT TIME ZONE`` and PostgreSQL writes them
+    as wall-clock in the container's ``TZ`` (see docker-compose ``TZ`` env
+    var).  The old implementation assumed naive = UTC, which was wrong on any
+    deployment whose container TZ wasn't UTC (default is Asia/Shanghai for
+    this project) and caused an 8-hour drift on the dashboard.
+
+    Delegating to ``to_utc_iso`` keeps this consistent with the global
+    ``SafeJSONProvider`` rule: naive timestamps are interpreted in the server's
+    local time zone, then re-emitted as UTC ISO 8601 with a ``Z`` suffix.
     """
-    JSON 序列化监控时间字段。PostgreSQL TIMESTAMP 无 tz 时按 UTC 解释（与 Docker 默认一致），
-    输出带 Z 的 ISO，避免前端把无时区字符串当本地时间而偏差 8 小时。
-    """
+    from app.utils.timeutil import to_utc_iso
+
     if value is None:
         return None
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            dt = value.replace(tzinfo=timezone.utc)
-        else:
-            dt = value.astimezone(timezone.utc)
-        s = dt.isoformat()
-        if s.endswith("+00:00"):
-            return s[:-6] + "Z"
-        return s
+        return to_utc_iso(value)
     if isinstance(value, date):
         return value.isoformat()
     return value

@@ -67,10 +67,12 @@ def analyze_polymarket():
         slug = None
         
         # 尝试从URL中提取
+        # `(?:/[a-z]{2}(?:-[A-Z]{2})?)?` 兼容Polymarket的语言前缀，例如 /zh/、/en/、/zh-CN/。
+        # `([^/?#]+)` 截到下一个 /、?、# 之前。
         url_patterns = [
-            r'polymarket\.com/event/([^/?]+)',
-            r'polymarket\.com/markets/(\d+)',
-            r'polymarket\.com/market/(\d+)',
+            r'polymarket\.com(?:/[a-z]{2}(?:-[A-Z]{2})?)?/event/([^/?#]+)',
+            r'polymarket\.com(?:/[a-z]{2}(?:-[A-Z]{2})?)?/markets/(\d+)',
+            r'polymarket\.com(?:/[a-z]{2}(?:-[A-Z]{2})?)?/market/(\d+)',
         ]
         
         for pattern in url_patterns:
@@ -84,41 +86,54 @@ def analyze_polymarket():
                     slug = extracted
                 break
         
-        # 如果没有从URL提取到，尝试搜索市场
-        if not market_id and not slug:
-            # 尝试通过标题搜索
-            logger.info(f"Searching for market by title: {input_text[:100]}")
-            search_results = polymarket_source.search_markets(input_text, limit=5)
-            if search_results:
-                # 使用第一个搜索结果
-                market_id = search_results[0].get('market_id')
-                logger.info(f"Found market via search: {market_id}")
-        
-        if not market_id and not slug:
-            return jsonify({
-                "code": 0,
-                "msg": "Could not parse market ID or slug from input. Please provide a valid Polymarket URL or market title.",
-                "data": None
-            }), 400
-        
         # 2. 获取市场数据
+        # 注意：如果用户输入了URL，slug或market_id已经被精确提取，必须按它精确取，
+        # 不要回退到模糊搜索 —— 那会把无关的热门市场误当成用户要的市场返回。
+        market = None
         if market_id:
             market = polymarket_source.get_market_details(market_id)
         elif slug:
-            # 通过slug查找市场（需要先搜索）
-            search_results = polymarket_source.search_markets(slug, limit=10)
-            market = None
-            for result in search_results:
-                if result.get('slug') == slug or slug in (result.get('question') or ''):
-                    market = result
-                    market_id = result.get('market_id')
-                    break
-            
-            if not market and search_results:
-                # 使用第一个搜索结果
-                market = search_results[0]
+            market = polymarket_source.get_market_details(slug)
+            if market and not market_id:
                 market_id = market.get('market_id')
-        
+        elif 'polymarket.com' in input_text.lower():
+            # 看起来是个polymarket URL但正则没抓到 —— 不要回退到fuzzy title search
+            # （那会把整段URL当作关键词去打分，必然返回无关结果）
+            return jsonify({
+                "code": 0,
+                "msg": "Could not parse a market slug from this Polymarket URL. Please paste the URL directly from a market page (looks like https://polymarket.com/event/<slug>).",
+                "data": None
+            }), 400
+        else:
+            # 用户输入的不是URL，按标题做关键词搜索；只有"足够确信"才接受
+            logger.info(f"Searching for market by title: {input_text[:100]}")
+            search_results = polymarket_source.search_markets(input_text, limit=5)
+            input_lower = input_text.lower()
+            confident_match = next(
+                (r for r in search_results if input_lower in (r.get('question') or '').lower()
+                 or input_lower == (r.get('slug') or '').lower()),
+                None,
+            )
+            if confident_match:
+                market = confident_match
+                market_id = market.get('market_id')
+            elif search_results:
+                # 找到了模糊候选但不够精准 —— 让用户改用URL，避免分析错市场
+                return jsonify({
+                    "code": 0,
+                    "msg": "Multiple possible markets matched. Please paste the exact Polymarket URL.",
+                    "data": {
+                        "candidates": [
+                            {
+                                "market_id": r.get('market_id'),
+                                "question": r.get('question'),
+                                "polymarket_url": r.get('polymarket_url'),
+                            }
+                            for r in search_results[:5]
+                        ]
+                    },
+                }), 409
+
         if not market:
             return jsonify({
                 "code": 0,
@@ -285,13 +300,10 @@ def get_polymarket_history():
             market_data = result_data.get('market', {})
             analysis_data = result_data.get('analysis', {})
             
+            # SafeJSONProvider normalizes datetimes to UTC ISO automatically.
             created_at = row.get('created_at')
             completed_at = row.get('completed_at')
-            if created_at and hasattr(created_at, 'isoformat'):
-                created_at = created_at.isoformat()
-            if completed_at and hasattr(completed_at, 'isoformat'):
-                completed_at = completed_at.isoformat()
-            
+
             items.append({
                 'id': row.get('id'),
                 'market_id': row.get('market_id'),

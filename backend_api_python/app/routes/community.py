@@ -30,14 +30,19 @@ def get_market_indicators():
         page_size: 每页数量 (default 12)
         keyword: 搜索关键词
         pricing_type: 'free' / 'paid' / 空(全部)
-        sort_by: 'newest' / 'hot' / 'price_asc' / 'price_desc' / 'rating'
+        sort_by: 'score' (default) / 'newest' / 'hot' / 'price_asc' /
+                 'price_desc' / 'rating'.
+                 'score' sorts by the composite multi-factor backtest score
+                 (see services/experiment/scoring.py) and is now the
+                 default — putting genuinely well-performing indicators
+                 at the top of the marketplace, not just the newest ones.
     """
     try:
         page = int(request.args.get('page', 1))
         page_size = int(request.args.get('page_size', 12))
         keyword = request.args.get('keyword', '').strip()
         pricing_type = request.args.get('pricing_type', '').strip() or None
-        sort_by = request.args.get('sort_by', 'newest').strip()
+        sort_by = request.args.get('sort_by', 'score').strip()
         
         # 限制每页数量
         page_size = min(max(page_size, 1), 50)

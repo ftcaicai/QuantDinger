@@ -5,27 +5,42 @@ import math
 import os
 import logging
 import traceback
+from datetime import date, datetime
 
 from flask import Flask
 from flask.json.provider import DefaultJSONProvider
 from flask_cors import CORS
 
 from app.utils.logger import setup_logger, get_logger
+from app.utils.timeutil import to_utc_iso
 
 
 class SafeJSONProvider(DefaultJSONProvider):
-    """JSON provider that converts NaN / Infinity to null.
+    """JSON provider with two cross-cutting behaviors.
 
-    Python's ``json.dumps`` with ``allow_nan=True`` (the default) emits
-    literal ``NaN`` / ``Infinity`` tokens which are **not** valid JSON per
-    RFC 8259.  JavaScript's ``JSON.parse()`` will throw on them, breaking
-    every frontend consumer.  This provider silently replaces those values
-    with ``None`` (→ ``null``) so the output is always spec-compliant.
+    1. NaN / Infinity → null.  ``json.dumps`` (allow_nan=True) emits literal
+       ``NaN`` / ``Infinity`` tokens which are **not** valid JSON per RFC 8259
+       and crash ``JSON.parse()`` on the frontend.
+
+    2. ``datetime`` → UTC ISO 8601 (``...Z``).  Database columns are stored as
+       naive ``TIMESTAMP`` in the container's local time zone (``TZ`` env
+       var).  Sending them out as a naive string forces the browser to
+       interpret them as *local* time, which breaks every user whose locale
+       differs from the server.  We normalize all datetimes to UTC with an
+       explicit ``Z`` suffix so the frontend can safely call
+       ``new Date(text).toLocaleString()``.
+
+    ``date`` objects (without a time component) are passed through as plain
+    ISO date strings since they don't carry a time-of-day to reinterpret.
     """
 
     @staticmethod
     def default(o):
-        """Handle non-serializable objects (same as super)."""
+        """Handle non-serializable objects (datetimes first, then super)."""
+        if isinstance(o, datetime):
+            return to_utc_iso(o)
+        if isinstance(o, date):
+            return o.isoformat()
         return DefaultJSONProvider.default(o)
 
     def dumps(self, obj, **kwargs):
@@ -34,7 +49,7 @@ class SafeJSONProvider(DefaultJSONProvider):
 
 
 def _safe_json_dumps(obj, **kwargs):
-    """Recursively sanitize NaN/Inf then serialize."""
+    """Recursively sanitize NaN/Inf and normalize datetimes, then serialize."""
     import json
     return json.dumps(_sanitize(obj), **kwargs)
 
@@ -44,6 +59,10 @@ def _sanitize(obj):
         if math.isnan(obj) or math.isinf(obj):
             return None
         return obj
+    if isinstance(obj, datetime):
+        return to_utc_iso(obj)
+    if isinstance(obj, date):
+        return obj.isoformat()
     if isinstance(obj, dict):
         return {k: _sanitize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):

@@ -5,14 +5,195 @@ Community Service - 指标社区服务
 """
 import json
 import time
+import statistics
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.services.billing_service import get_billing_service
+from app.services.experiment.scoring import StrategyScoringService
 
 logger = get_logger(__name__)
+
+
+# Field set we pull out of qd_backtest_runs.result_json. Centralised so
+# get_market_indicators (list, N indicators) and get_indicator_performance
+# (single indicator, deeper detail) agree on parsing & units.
+#
+# Units (matching what services/backtest.py:_run() writes):
+#   totalReturn / annualReturn  – percent, e.g. 12.5 means +12.5%
+#   maxDrawdown                 – percent, NEGATIVE, e.g. -8.3 means -8.3%
+#   sharpeRatio                 – plain number
+#   winRate                     – percent 0..100
+#   profitFactor                – ratio, >1 means net winner
+#   totalTrades                 – integer count of closing trades
+def _parse_backtest_result(raw: str) -> Optional[Dict[str, Any]]:
+    """Decode result_json string -> dict, returning None on any parse error.
+
+    Returns the full result dict (not just KPI fields) because downstream
+    callers may need ``equityCurve``, ``startDate``, etc.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        rj = json.loads(raw)
+        return rj if isinstance(rj, dict) else None
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _summarise_indicator_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate one indicator's successful backtest runs into a single
+    representative KPI block + a composite ``score``.
+
+    Args:
+        runs: list of qd_backtest_runs rows. Each row is expected to expose
+            at least ``id``, ``symbol``, ``timeframe`` and ``result_json``.
+
+    Strategy / why this is shaped like this:
+      * We *score every run individually* through ``StrategyScoringService``
+        (the same engine the parameter-optimisation page uses) and then
+        take the **median** of those scores as the indicator's headline.
+        Median, not mean, because one freak run on the most generous
+        symbol shouldn't single-handedly drag a mediocre indicator into
+        the top of the leaderboard.
+      * For the KPI numbers shown on the card (return / sharpe / drawdown
+        / win-rate) we also use the **median** across runs. Same reason.
+      * ``best_run_id`` is the run with the highest *individual* score —
+        that's the one whose equity curve we'll draw on the detail page,
+        because picking by raw return is gameable (one lucky backtest
+        with crazy DD wins it).
+      * ``applicable_symbols`` / ``applicable_timeframes`` are the union
+        of everywhere the author successfully ran a backtest. This is the
+        "automatic inference" path the user explicitly chose over having
+        authors hand-tag the publish form.
+    """
+    empty = {
+        'score': 0.0,
+        'total_return': 0.0,
+        'annual_return': 0.0,
+        'sharpe': 0.0,
+        'max_drawdown': 0.0,
+        'win_rate': 0.0,
+        'profit_factor': 0.0,
+        'sample_size': 0,
+        'best_run_id': None,
+        'symbols': [],
+        'timeframes': [],
+    }
+    if not runs:
+        return empty
+
+    scorer = StrategyScoringService()
+    scored: List[Tuple[float, int, Dict[str, Any]]] = []
+    returns: List[float] = []
+    annual_returns: List[float] = []
+    sharpes: List[float] = []
+    drawdowns: List[float] = []
+    win_rates: List[float] = []
+    profit_factors: List[float] = []
+    symbols: List[str] = []
+    timeframes: List[str] = []
+
+    for run in runs:
+        rj = _parse_backtest_result(run.get('result_json'))
+        if not rj:
+            continue
+        try:
+            score_info = scorer.score_result(rj)
+            score_val = float(score_info.get('overall') or 0)
+        except Exception:
+            logger.debug("score_result failed for run %s", run.get('id'), exc_info=True)
+            score_val = 0.0
+
+        scored.append((score_val, int(run.get('id') or 0), rj))
+        returns.append(float(rj.get('totalReturn') or 0))
+        annual_returns.append(float(rj.get('annualReturn') or 0))
+        sharpes.append(float(rj.get('sharpeRatio') or 0))
+        drawdowns.append(float(rj.get('maxDrawdown') or 0))
+        win_rates.append(float(rj.get('winRate') or 0))
+        profit_factors.append(float(rj.get('profitFactor') or 0))
+
+        sym = (run.get('symbol') or '').strip()
+        tf = (run.get('timeframe') or '').strip()
+        if sym:
+            symbols.append(sym)
+        if tf:
+            timeframes.append(tf)
+
+    if not scored:
+        return empty
+
+    score_values = [s for s, _, _ in scored]
+    headline_score = round(statistics.median(score_values), 2)
+    best = max(scored, key=lambda x: x[0])
+    best_run_id = best[1] or None
+
+    def _median(xs: List[float]) -> float:
+        return round(statistics.median(xs), 2) if xs else 0.0
+
+    # Dedupe preserving first-seen order so the UI shows the most-used
+    # symbol first when truncating to "BTC/USDT +2 more".
+    def _dedup(xs: List[str]) -> List[str]:
+        seen = set()
+        out = []
+        for x in xs:
+            if x and x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    return {
+        'score': headline_score,
+        'total_return': _median(returns),
+        'annual_return': _median(annual_returns),
+        'sharpe': _median(sharpes),
+        'max_drawdown': _median(drawdowns),  # already negative %, keep sign
+        'win_rate': _median(win_rates),
+        'profit_factor': _median(profit_factors),
+        'sample_size': len(scored),
+        'best_run_id': best_run_id,
+        'symbols': _dedup(symbols),
+        'timeframes': _dedup(timeframes),
+    }
+
+
+def _fetch_indicator_kpis(cur, indicator_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Batch-load KPI summary for several indicator ids in one round-trip.
+
+    Returns ``{indicator_id: kpi_dict}``. Indicators with zero successful
+    backtests get an empty kpi dict (score=0, symbols=[], etc.) — they
+    still appear in the dict so callers don't have to do KeyError dances.
+
+    Why batching: ``get_market_indicators`` returns up to ``page_size``
+    indicators per request. Running one ``SELECT … FROM qd_backtest_runs``
+    per indicator would scale linearly with page size and dominate the
+    request budget; a single ``IN (…)`` query plus an in-Python group-by
+    is O(N + M) where M is total runs across the page.
+    """
+    if not indicator_ids:
+        return {}
+    # Bucket runs by indicator_id first, then summarise each bucket.
+    buckets: Dict[int, List[Dict[str, Any]]] = {iid: [] for iid in indicator_ids}
+    placeholders = ','.join(['%s'] * len(indicator_ids))
+    try:
+        cur.execute(f"""
+            SELECT id, indicator_id, symbol, timeframe, result_json
+            FROM qd_backtest_runs
+            WHERE indicator_id IN ({placeholders})
+              AND status = 'success'
+              AND result_json IS NOT NULL AND result_json != ''
+        """, tuple(indicator_ids))
+        for row in cur.fetchall() or []:
+            iid = int(row.get('indicator_id') or 0)
+            if iid in buckets:
+                buckets[iid].append(dict(row))
+    except Exception:
+        logger.debug("Batch KPI query failed; returning empty KPIs", exc_info=True)
+        return {iid: _summarise_indicator_runs([]) for iid in indicator_ids}
+
+    return {iid: _summarise_indicator_runs(rows) for iid, rows in buckets.items()}
 
 
 class CommunityService:
@@ -47,33 +228,56 @@ class CommunityService:
         page_size: int = 12,
         keyword: str = None,
         pricing_type: str = None,  # 'free' / 'paid' / None(all)
-        sort_by: str = 'newest',   # 'newest' / 'hot' / 'price_asc' / 'price_desc' / 'rating'
+        sort_by: str = 'score',    # 'score' / 'newest' / 'hot' / 'price_asc' / 'price_desc' / 'rating'
         user_id: int = None        # 当前用户ID，用于判断是否已购买
     ) -> Dict[str, Any]:
-        """获取市场上已发布的指标列表"""
+        """获取市场上已发布的指标列表
+
+        About ``sort_by='score'`` (the new default):
+            The composite score lives in qd_backtest_runs.result_json, which
+            is opaque to SQL. We can't ORDER BY it cheaply. Instead, when
+            the caller asks for score-sorted results, we:
+              1. Pull the *full set* of approved + published indicators
+                 (id-only, very cheap row).
+              2. Batch-compute their scores via _fetch_indicator_kpis.
+              3. Sort by score in Python.
+              4. Slice [offset:offset+page_size] and re-query the full row
+                 for just that slice.
+
+            For other sort_by values (newest / hot / price / rating), the
+            sort can be done in SQL, so we keep the original cheap path
+            and only batch-compute KPIs for the visible page.
+
+            The trade-off: score-sort is O(N) per request in indicators
+            count, but N here is "how many indicators have ever been
+            published" — currently realistic in the low hundreds. If the
+            community grows past ~5k we'll want to denormalise the score
+            onto qd_indicator_codes via a periodic job; until then this
+            is fine and saves a schema migration.
+        """
         offset = (page - 1) * page_size
-        
+
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
-                
+
                 # 构建查询条件 - 只显示已发布且审核通过的指标
                 where_clauses = ["i.publish_to_community = 1", "(i.review_status = 'approved' OR i.review_status IS NULL)"]
                 params = []
-                
+
                 if keyword and keyword.strip():
                     where_clauses.append("(i.name ILIKE ? OR i.description ILIKE ?)")
                     search_term = f"%{keyword.strip()}%"
                     params.extend([search_term, search_term])
-                
+
                 if pricing_type == 'free':
                     where_clauses.append("(i.pricing_type = 'free' OR i.price <= 0)")
                 elif pricing_type == 'paid':
                     where_clauses.append("(i.pricing_type != 'free' AND i.price > 0)")
-                
+
                 where_sql = " AND ".join(where_clauses)
-                
-                # 排序
+
+                # SQL-friendly sorts:
                 order_map = {
                     'newest': 'i.created_at DESC',
                     'hot': 'i.purchase_count DESC, i.view_count DESC',
@@ -81,34 +285,72 @@ class CommunityService:
                     'price_desc': 'i.price DESC, i.created_at DESC',
                     'rating': 'i.avg_rating DESC, i.rating_count DESC'
                 }
-                order_sql = order_map.get(sort_by, 'i.created_at DESC')
-                
-                # 获取总数
-                count_sql = f"""
-                    SELECT COUNT(*) as count 
-                    FROM qd_indicator_codes i 
-                    WHERE {where_sql}
-                """
+
+                # 获取总数（无论哪种排序，total 都是一样的）
+                count_sql = f"SELECT COUNT(*) as count FROM qd_indicator_codes i WHERE {where_sql}"
                 cur.execute(count_sql, tuple(params))
                 total = cur.fetchone()['count']
-                
-                # 获取列表（联表查询作者信息）
-                query_sql = f"""
-                    SELECT 
-                        i.id, i.name, i.description, i.pricing_type, i.price, COALESCE(i.vip_free, FALSE) as vip_free,
-                        i.preview_image, i.purchase_count, i.avg_rating, i.rating_count,
-                        i.view_count, i.created_at, i.updated_at,
-                        u.id as author_id, u.username as author_username, 
-                        u.nickname as author_nickname, u.avatar as author_avatar
-                    FROM qd_indicator_codes i
-                    LEFT JOIN qd_users u ON i.user_id = u.id
-                    WHERE {where_sql}
-                    ORDER BY {order_sql}
-                    LIMIT ? OFFSET ?
-                """
-                cur.execute(query_sql, tuple(params + [page_size, offset]))
-                rows = cur.fetchall() or []
-                
+
+                if sort_by == 'score':
+                    # Score sort path: fetch ALL matching ids, score them,
+                    # sort in Python, then refetch full rows for the page.
+                    cur.execute(
+                        f"SELECT i.id FROM qd_indicator_codes i WHERE {where_sql}",
+                        tuple(params)
+                    )
+                    all_ids = [int(r['id']) for r in (cur.fetchall() or [])]
+                    kpi_by_id = _fetch_indicator_kpis(cur, all_ids)
+                    # Tie-break with created_at via id (newer id ≈ newer row)
+                    # so deterministic ordering when many indicators score 0.
+                    all_ids.sort(
+                        key=lambda iid: (
+                            -(kpi_by_id.get(iid, {}).get('score') or 0),
+                            -iid
+                        )
+                    )
+                    page_ids = all_ids[offset:offset + page_size]
+                    if not page_ids:
+                        cur.close()
+                        return {
+                            'items': [], 'total': total, 'page': page,
+                            'page_size': page_size, 'total_pages': 0
+                        }
+                    id_placeholders = ','.join(['?'] * len(page_ids))
+                    cur.execute(f"""
+                        SELECT
+                            i.id, i.name, i.description, i.pricing_type, i.price, COALESCE(i.vip_free, FALSE) as vip_free,
+                            i.preview_image, i.purchase_count, i.avg_rating, i.rating_count,
+                            i.view_count, i.created_at, i.updated_at,
+                            u.id as author_id, u.username as author_username,
+                            u.nickname as author_nickname, u.avatar as author_avatar
+                        FROM qd_indicator_codes i
+                        LEFT JOIN qd_users u ON i.user_id = u.id
+                        WHERE i.id IN ({id_placeholders})
+                    """, tuple(page_ids))
+                    rows_unordered = cur.fetchall() or []
+                    # Preserve our score-sorted order even though SQL won't
+                    by_id = {r['id']: r for r in rows_unordered}
+                    rows = [by_id[iid] for iid in page_ids if iid in by_id]
+                    page_kpis = {iid: kpi_by_id.get(iid, _summarise_indicator_runs([])) for iid in page_ids}
+                else:
+                    order_sql = order_map.get(sort_by, 'i.created_at DESC')
+                    query_sql = f"""
+                        SELECT
+                            i.id, i.name, i.description, i.pricing_type, i.price, COALESCE(i.vip_free, FALSE) as vip_free,
+                            i.preview_image, i.purchase_count, i.avg_rating, i.rating_count,
+                            i.view_count, i.created_at, i.updated_at,
+                            u.id as author_id, u.username as author_username,
+                            u.nickname as author_nickname, u.avatar as author_avatar
+                        FROM qd_indicator_codes i
+                        LEFT JOIN qd_users u ON i.user_id = u.id
+                        WHERE {where_sql}
+                        ORDER BY {order_sql}
+                        LIMIT ? OFFSET ?
+                    """
+                    cur.execute(query_sql, tuple(params + [page_size, offset]))
+                    rows = cur.fetchall() or []
+                    page_kpis = _fetch_indicator_kpis(cur, [r['id'] for r in rows])
+
                 # 如果有当前用户，查询已购买的指标
                 purchased_ids = set()
                 if user_id:
@@ -120,12 +362,13 @@ class CommunityService:
                             tuple([user_id] + indicator_ids)
                         )
                         purchased_ids = {r['indicator_id'] for r in (cur.fetchall() or [])}
-                
+
                 cur.close()
-                
+
                 # 格式化返回数据
                 items = []
                 for row in rows:
+                    kpi = page_kpis.get(row['id'], _summarise_indicator_runs([]))
                     items.append({
                         'id': row['id'],
                         'name': row['name'],
@@ -146,9 +389,23 @@ class CommunityService:
                             'avatar': row['author_avatar'] or '/avatar2.jpg'
                         },
                         'is_purchased': row['id'] in purchased_ids,
-                        'is_own': row['author_id'] == user_id
+                        'is_own': row['author_id'] == user_id,
+                        # New: backtest-derived KPIs and applicability hints.
+                        # All fields are guaranteed present even when an
+                        # indicator has zero backtests — values just degrade
+                        # to 0 / empty lists.
+                        'score': kpi['score'],
+                        'total_return': kpi['total_return'],
+                        'annual_return': kpi['annual_return'],
+                        'sharpe': kpi['sharpe'],
+                        'max_drawdown': kpi['max_drawdown'],
+                        'win_rate_backtest': kpi['win_rate'],
+                        'profit_factor': kpi['profit_factor'],
+                        'sample_size': kpi['sample_size'],
+                        'applicable_symbols': kpi['symbols'],
+                        'applicable_timeframes': kpi['timeframes'],
                     })
-                
+
                 return {
                     'items': items,
                     'total': total,
@@ -156,7 +413,7 @@ class CommunityService:
                     'page_size': page_size,
                     'total_pages': (total + page_size - 1) // page_size if total > 0 else 0
                 }
-                
+
         except Exception as e:
             logger.error(f"get_market_indicators failed: {e}")
             return {'items': [], 'total': 0, 'page': 1, 'page_size': page_size, 'total_pages': 0}
@@ -1096,57 +1353,111 @@ class CommunityService:
 
     def get_indicator_performance(self, indicator_id: int) -> Dict[str, Any]:
         """
-        获取指标的实盘表现统计
+        获取指标的实盘表现统计（详情页用）。
 
         数据来源：
-        1. qd_backtest_runs - 回测记录（result_json 内含 totalReturn / winRate 等）
-        2. qd_strategy_trades + qd_strategies_trading - 真实实盘交易记录
+          1. qd_backtest_runs (result_json) – 全部成功回测
+          2. qd_backtest_equity_points       – 最佳回测的净值曲线点
+          3. qd_strategies_trading + qd_strategy_trades – 真实实盘记录
+
+        Response keys
+        -------------
+        Backtest-derived (median across all successful runs, never NULL):
+            score, total_return, annual_return, sharpe, max_drawdown,
+            profit_factor, win_rate_backtest, sample_size,
+            applicable_symbols, applicable_timeframes
+        Live trading derived:
+            live_strategy_count, live_trade_count, live_win_rate,
+            live_total_profit
+        Headline combined fields (preserved for backwards compatibility
+        with the existing IndicatorDetail.vue template):
+            strategy_count, trade_count, win_rate, total_profit
+        Equity curve (best backtest only):
+            best_run_id, best_run_meta { symbol, timeframe, total_return,
+            sharpe, max_drawdown, started_at, ended_at },
+            equity_curve [ { time, value } ]
         """
         default_result = {
             'strategy_count': 0,
             'trade_count': 0,
-            'win_rate': 0,
-            'total_profit': 0,
-            'avg_return': 0,
-            'max_drawdown': 0
+            'win_rate': 0.0,
+            'total_profit': 0.0,
+            'score': 0.0,
+            'total_return': 0.0,
+            'annual_return': 0.0,
+            'sharpe': 0.0,
+            'max_drawdown': 0.0,
+            'profit_factor': 0.0,
+            'win_rate_backtest': 0.0,
+            'sample_size': 0,
+            'applicable_symbols': [],
+            'applicable_timeframes': [],
+            'live_strategy_count': 0,
+            'live_trade_count': 0,
+            'live_win_rate': 0.0,
+            'live_total_profit': 0.0,
+            'best_run_id': None,
+            'best_run_meta': None,
+            'equity_curve': [],
         }
 
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
 
-                # ---------- Part 1: 回测数据（从 result_json 解析） ----------
-                bt_returns = []
-                bt_win_rates = []
-                bt_drawdowns = []
-                bt_trade_counts = []
+                # ---------- Part 1: 回测聚合（评分 + KPI + 适用范围） ----------
+                # We re-use the same code path the list endpoint uses so
+                # detail and list pages never disagree on score / KPI.
+                cur.execute("""
+                    SELECT id, indicator_id, symbol, timeframe, start_date, end_date, result_json
+                    FROM qd_backtest_runs
+                    WHERE indicator_id = %s AND status = 'success'
+                          AND result_json IS NOT NULL AND result_json != ''
+                """, (indicator_id,))
+                bt_rows = [dict(r) for r in (cur.fetchall() or [])]
+                kpi = _summarise_indicator_runs(bt_rows)
 
-                try:
-                    cur.execute("""
-                        SELECT result_json
-                        FROM qd_backtest_runs
-                        WHERE indicator_id = %s AND status = 'success'
-                              AND result_json IS NOT NULL AND result_json != ''
-                    """, (indicator_id,))
-                    rows = cur.fetchall()
+                # Surface the "best" run's metadata so the detail UI can
+                # label the equity-curve panel with "this came from a
+                # 4h BTC/USDT backtest, +12.4%, max DD -8.1%".
+                # NB: schema columns are ``start_date`` / ``end_date``
+                # (VARCHAR(20) yyyy-mm-dd), not ``started_at``/``ended_at``.
+                best_run_meta = None
+                if kpi['best_run_id']:
+                    best_row = next((r for r in bt_rows if int(r.get('id') or 0) == kpi['best_run_id']), None)
+                    if best_row:
+                        rj = _parse_backtest_result(best_row.get('result_json')) or {}
+                        best_run_meta = {
+                            'symbol': best_row.get('symbol') or '',
+                            'timeframe': best_row.get('timeframe') or '',
+                            'total_return': float(rj.get('totalReturn') or 0),
+                            'sharpe': float(rj.get('sharpeRatio') or 0),
+                            'max_drawdown': float(rj.get('maxDrawdown') or 0),
+                            'win_rate': float(rj.get('winRate') or 0),
+                            'start_date': str(best_row.get('start_date') or '') or None,
+                            'end_date': str(best_row.get('end_date') or '') or None,
+                        }
 
-                    for row in rows:
-                        try:
-                            rj = json.loads(row['result_json']) if isinstance(row['result_json'], str) else {}
-                            tr = float(rj.get('totalReturn', 0) or 0)
-                            wr = float(rj.get('winRate', 0) or 0)
-                            md = float(rj.get('maxDrawdown', 0) or 0)
-                            tc = int(rj.get('totalTrades', 0) or 0)
-                            bt_returns.append(tr)
-                            bt_win_rates.append(wr)
-                            bt_drawdowns.append(md)
-                            bt_trade_counts.append(tc)
-                        except (json.JSONDecodeError, TypeError, ValueError):
-                            continue
-                except Exception:
-                    logger.debug("Backtest runs query skipped or failed", exc_info=True)
-
-                bt_run_count = len(bt_returns)
+                # Equity curve for the best run. Pulled from
+                # qd_backtest_equity_points (one row per sample point) so
+                # this works even if the run's result_json doesn't embed
+                # the full curve.
+                equity_curve: List[Dict[str, Any]] = []
+                if kpi['best_run_id']:
+                    try:
+                        cur.execute("""
+                            SELECT point_index, point_time, point_value
+                            FROM qd_backtest_equity_points
+                            WHERE run_id = %s
+                            ORDER BY point_index ASC
+                        """, (kpi['best_run_id'],))
+                        for p in (cur.fetchall() or []):
+                            equity_curve.append({
+                                'time': p.get('point_time') or '',
+                                'value': float(p.get('point_value') or 0),
+                            })
+                    except Exception:
+                        logger.debug("equity_points query failed", exc_info=True)
 
                 # ---------- Part 2: 实盘交易数据 ----------
                 live_strategy_count = 0
@@ -1156,13 +1467,12 @@ class CommunityService:
 
                 try:
                     # 找出使用该指标的策略（indicator_config JSON 中 indicator_id 匹配）
+                    # JSON 序列化有时带空格、有时不带，两种格式都试一遍。
                     cur.execute("""
                         SELECT id FROM qd_strategies_trading
                         WHERE indicator_config::text LIKE %s
                     """, (f'%"indicator_id": {indicator_id}%',))
                     strategy_rows = cur.fetchall()
-
-                    # 也尝试匹配无空格的格式
                     if not strategy_rows:
                         cur.execute("""
                             SELECT id FROM qd_strategies_trading
@@ -1175,58 +1485,93 @@ class CommunityService:
                         live_strategy_count = len(strategy_ids)
 
                         placeholders = ','.join(['%s'] * len(strategy_ids))
+                        # ``profit IS NOT NULL`` excludes open events (they
+                        # carry NULL profit). ``profit != 0`` was the legacy
+                        # filter — it also worked because NULL comparisons
+                        # return NULL (= falsy in SQL) but it accidentally
+                        # dropped genuine break-even closes from the
+                        # denominator. We use the more explicit NOT NULL
+                        # check, in line with the dashboard fix.
                         cur.execute(f"""
-                            SELECT 
+                            SELECT
                                 COUNT(*) as trade_count,
                                 SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END) as win_count,
+                                SUM(CASE WHEN profit < 0 THEN 1 ELSE 0 END) as loss_count,
                                 SUM(profit) as total_profit
                             FROM qd_strategy_trades
                             WHERE strategy_id IN ({placeholders})
-                              AND profit != 0
+                              AND profit IS NOT NULL
                         """, tuple(strategy_ids))
                         trade_row = cur.fetchone()
 
                         if trade_row and (trade_row['trade_count'] or 0) > 0:
                             live_trade_count = int(trade_row['trade_count'] or 0)
                             win_count = int(trade_row['win_count'] or 0)
-                            live_win_rate = round(win_count / live_trade_count * 100, 2) if live_trade_count > 0 else 0.0
+                            loss_count = int(trade_row['loss_count'] or 0)
+                            decided = win_count + loss_count
+                            # Win rate over *decided* trades — same convention
+                            # as the dashboard fix, so a strategy with
+                            # "2 wins / 0 losses / 1 break-even" reads as 100%.
+                            live_win_rate = round(win_count / decided * 100, 2) if decided > 0 else 0.0
                             live_total_profit = round(float(trade_row['total_profit'] or 0), 2)
                 except Exception:
                     logger.debug("Live trading query skipped or failed", exc_info=True)
 
                 cur.close()
 
-                # ---------- Combine results ----------
-                total_strategy_count = bt_run_count + live_strategy_count
-                total_trade_count = sum(bt_trade_counts) + live_trade_count
+                # ---------- Combine ----------
+                total_strategy_count = kpi['sample_size'] + live_strategy_count
+                # Trade count from backtests is approximate (sum of per-run
+                # totalTrades) — we don't claim it as a precise metric, just
+                # a "size of evidence" hint on the detail page.
+                bt_trades_total = 0
+                for row in bt_rows:
+                    rj = _parse_backtest_result(row.get('result_json')) or {}
+                    bt_trades_total += int(rj.get('totalTrades') or 0)
+                total_trade_count = bt_trades_total + live_trade_count
 
-                # 综合胜率：优先实盘 > 回测平均
+                # 综合胜率 / 总利润：实盘优先；没有实盘就退回回测中位。
+                # (Previously this used the *mean* of backtest win-rates. We
+                # switched to median because one weirdly successful run can
+                # otherwise drag the rate from 45% to 70% on three samples.)
                 if live_trade_count > 0:
                     combined_win_rate = live_win_rate
-                elif bt_win_rates:
-                    combined_win_rate = round(sum(bt_win_rates) / len(bt_win_rates), 2)
+                    combined_profit = live_total_profit
                 else:
-                    combined_win_rate = 0.0
+                    combined_win_rate = kpi['win_rate']
+                    combined_profit = kpi['total_return']
 
-                # 平均收益率（回测 totalReturn %）
-                avg_return = round(sum(bt_returns) / len(bt_returns), 2) if bt_returns else 0.0
-
-                # 总利润：优先用实盘绝对利润，无实盘则显示回测平均收益率
-                combined_profit = live_total_profit if live_trade_count > 0 else avg_return
-
-                # 最大回撤取回测中最差的（maxDrawdown 是负数，取最小即最差）
-                avg_drawdown = round(min(bt_drawdowns), 2) if bt_drawdowns else 0.0
-
-                if total_strategy_count == 0 and total_trade_count == 0:
+                if total_strategy_count == 0 and total_trade_count == 0 and not equity_curve:
                     return default_result
 
                 return {
+                    # Backwards-compatible headline fields
                     'strategy_count': total_strategy_count,
                     'trade_count': total_trade_count,
                     'win_rate': combined_win_rate,
                     'total_profit': round(combined_profit, 2),
-                    'avg_return': avg_return,
-                    'max_drawdown': avg_drawdown
+                    # Backtest-derived stats (always populated, even with
+                    # zero runs — values just degrade to 0)
+                    'score': kpi['score'],
+                    'total_return': kpi['total_return'],
+                    'annual_return': kpi['annual_return'],
+                    'sharpe': kpi['sharpe'],
+                    'max_drawdown': kpi['max_drawdown'],
+                    'profit_factor': kpi['profit_factor'],
+                    'win_rate_backtest': kpi['win_rate'],
+                    'sample_size': kpi['sample_size'],
+                    'applicable_symbols': kpi['symbols'],
+                    'applicable_timeframes': kpi['timeframes'],
+                    # Live-only breakdown so the UI can show
+                    # "live: X / backtest: Y" side by side if it wants.
+                    'live_strategy_count': live_strategy_count,
+                    'live_trade_count': live_trade_count,
+                    'live_win_rate': live_win_rate,
+                    'live_total_profit': live_total_profit,
+                    # Equity curve panel data
+                    'best_run_id': kpi['best_run_id'],
+                    'best_run_meta': best_run_meta,
+                    'equity_curve': equity_curve,
                 }
 
         except Exception as e:

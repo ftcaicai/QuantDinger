@@ -65,6 +65,67 @@ def _now_ts() -> int:
     return int(time.time())
 
 
+def _bump_monitor_schedule(
+    monitor_id: int,
+    interval_minutes: int,
+    last_result: Any,
+    skipped: bool = False,
+) -> None:
+    """Advance ``next_run_at`` after a monitor cycle (real run or skip).
+
+    Both INSERT (creation) and UPDATE paths must produce timestamps with the
+    same time-zone semantics; ``qd_position_monitors`` columns are naive
+    ``TIMESTAMP``, so we let PostgreSQL compute everything via ``NOW()`` and
+    ``INTERVAL`` to stay consistent with the creation path in
+    ``routes/portfolio.py``.
+
+    When ``skipped`` is True we keep ``last_run_at`` and ``run_count`` as-is
+    (since the monitor didn't actually consume an analysis cycle), but we
+    still push ``next_run_at`` forward so the loop does not keep firing the
+    same monitor every 30 seconds while the underlying condition (no credits,
+    symbol removed from watchlist, etc.) persists.
+    """
+    try:
+        interval = int(interval_minutes or 60)
+        if interval <= 0:
+            interval = 60
+        # Cap at one week to avoid pathological intervals from bad configs.
+        interval = min(interval, 60 * 24 * 7)
+
+        result_json = json.dumps(last_result, ensure_ascii=False, default=str)
+
+        with get_db_connection() as db:
+            cur = db.cursor()
+            if skipped:
+                cur.execute(
+                    """
+                    UPDATE qd_position_monitors
+                    SET next_run_at = NOW() + INTERVAL '%s minutes',
+                        last_result = ?,
+                        updated_at = NOW()
+                    WHERE id = ?
+                    """,
+                    (interval, result_json, monitor_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE qd_position_monitors
+                    SET last_run_at = NOW(),
+                        next_run_at = NOW() + INTERVAL '%s minutes',
+                        last_result = ?,
+                        run_count = run_count + 1,
+                        updated_at = NOW()
+                    WHERE id = ?
+                    """,
+                    (interval, result_json, monitor_id),
+                )
+            db.commit()
+            cur.close()
+    except Exception as e:
+        logger.error(f"_bump_monitor_schedule failed for monitor #{monitor_id}: {e}")
+
+
 def _resolve_notification_delivery(user_id: int, notification_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
     合并个人中心保存的 notification_settings 到 targets，并规范化 channels。
@@ -1309,7 +1370,14 @@ def run_single_monitor(
 
             if not still_in_watchlist:
                 logger.info(f"Monitor #{monitor_id} skipped: {target_mkt}:{target_sym} removed from watchlist")
-                return {'success': False, 'error': 'Symbol removed from watchlist'}
+                skip_result = {
+                    'success': False,
+                    'error': 'Symbol removed from watchlist',
+                    'skipped': True,
+                    'timestamp': _now_ts(),
+                }
+                _bump_monitor_schedule(monitor_id, interval_minutes, skip_result, skipped=True)
+                return skip_result
 
             # Rules 1&2: match real position if exists, otherwise virtual observation
             matched = _get_positions_for_monitor(None, user_id=monitor_user_id)
@@ -1336,7 +1404,14 @@ def run_single_monitor(
 
         if not positions:
             logger.info(f"Monitor #{monitor_id} skipped: no matching positions found")
-            return {'success': False, 'error': 'No matching positions found'}
+            skip_result = {
+                'success': False,
+                'error': 'No matching positions found',
+                'skipped': True,
+                'timestamp': _now_ts(),
+            }
+            _bump_monitor_schedule(monitor_id, interval_minutes, skip_result, skipped=True)
+            return skip_result
 
         # ── Billing ──
         billing = get_billing_service()
@@ -1351,10 +1426,14 @@ def run_single_monitor(
                     f"Monitor #{monitor_id} skipped: insufficient credits "
                     f"({user_credits} < {total_cost} for {symbol_count} symbols)"
                 )
-                return {
+                skip_result = {
                     'success': False,
-                    'error': f'Insufficient credits: need {total_cost}, have {user_credits}'
+                    'error': f'Insufficient credits: need {total_cost}, have {user_credits}',
+                    'skipped': True,
+                    'timestamp': _now_ts(),
                 }
+                _bump_monitor_schedule(monitor_id, interval_minutes, skip_result, skipped=True)
+                return skip_result
             for i in range(symbol_count):
                 pos = positions[i]
                 ok, msg = billing.check_and_consume(
@@ -1371,22 +1450,10 @@ def run_single_monitor(
         else:
             result = {'success': False, 'error': f'Unsupported monitor type: {monitor_type}'}
 
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                UPDATE qd_position_monitors
-                SET last_run_at = NOW(),
-                    next_run_at = NOW() + INTERVAL '%s minutes',
-                    last_result = ?,
-                    run_count = run_count + 1,
-                    updated_at = NOW()
-                WHERE id = ?
-                """,
-                (interval_minutes, json.dumps(result, ensure_ascii=False, default=str), monitor_id)
-            )
-            db.commit()
-            cur.close()
+        # Advance the schedule using PostgreSQL's NOW() / INTERVAL to stay
+        # consistent with the INSERT path (routes/portfolio.py) and avoid any
+        # naive vs aware timestamp drift on the TIMESTAMP columns.
+        _bump_monitor_schedule(monitor_id, interval_minutes, result, skipped=False)
 
         language = config.get('language', 'en-US')
         custom_prompt = config.get('prompt', '')

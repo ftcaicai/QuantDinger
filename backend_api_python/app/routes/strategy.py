@@ -1997,10 +1997,11 @@ def get_strategy_logs():
                 continue
             ts = rr.get('timestamp')
             if ts is not None and hasattr(ts, 'isoformat'):
-                if getattr(ts, 'tzinfo', None) is not None:
-                    rr['timestamp'] = ts.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S') + 'Z'
-                else:
-                    rr['timestamp'] = ts.strftime('%Y-%m-%dT%H:%M:%S') + 'Z'
+                # naive timestamps from the DB are wall-clock in the server's
+                # TZ; ``to_utc_iso`` converts them to UTC ISO with a Z suffix
+                # so the frontend can render them in the user's locale.
+                from app.utils.timeutil import to_utc_iso
+                rr['timestamp'] = to_utc_iso(ts)
             out.append(rr)
         logs = list(reversed(out))
         return jsonify({'code': 1, 'msg': 'success', 'data': logs})

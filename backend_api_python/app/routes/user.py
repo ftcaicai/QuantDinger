@@ -373,9 +373,10 @@ def set_user_vip():
         
         if success:
             return jsonify({
-                'code': 1, 
-                'msg': 'VIP status updated successfully', 
-                'data': {'vip_expires_at': expires_at.isoformat() if expires_at else None}
+                'code': 1,
+                'msg': 'VIP status updated successfully',
+                # Let SafeJSONProvider normalize datetimes to UTC ISO (with Z).
+                'data': {'vip_expires_at': expires_at if expires_at else None}
             })
         else:
             return jsonify({'code': 0, 'msg': result, 'data': None}), 400
@@ -614,7 +615,8 @@ def get_my_referrals():
                     'username': row['username'],
                     'nickname': row['nickname'],
                     'avatar': row['avatar'],
-                    'created_at': row['created_at'].isoformat() if row['created_at'] else None
+                    # SafeJSONProvider serializes datetimes as UTC ISO.
+                    'created_at': row['created_at']
                 })
         
         return jsonify({
@@ -724,6 +726,12 @@ def update_notification_settings():
             default_channels = ['browser']
         
         # Build settings object
+        #
+        # webhook_signing_secret is optional and only meaningful for
+        # specific dialects (Feishu in-body sign / DingTalk URL sign).
+        # Generic self-hosted webhooks can use it for HMAC header
+        # signing — see signal_notifier._notify_webhook for the full
+        # semantics.
         settings = {
             'default_channels': default_channels,
             'telegram_bot_token': str(data.get('telegram_bot_token') or '').strip(),
@@ -732,6 +740,7 @@ def update_notification_settings():
             'discord_webhook': str(data.get('discord_webhook') or '').strip(),
             'webhook_url': str(data.get('webhook_url') or '').strip(),
             'webhook_token': str(data.get('webhook_token') or '').strip(),
+            'webhook_signing_secret': str(data.get('webhook_signing_secret') or '').strip(),
             'phone': str(data.get('phone') or '').strip(),
         }
         
@@ -991,6 +1000,7 @@ def test_notification_settings():
             'discord': (settings.get('discord_webhook') or '').strip(),
             'webhook': (settings.get('webhook_url') or '').strip(),
             'webhook_token': (settings.get('webhook_token') or '').strip(),
+            'webhook_signing_secret': (settings.get('webhook_signing_secret') or '').strip(),
         }
 
         accept = (request.headers.get('Accept-Language') or '') + ' ' + (request.headers.get('X-Locale') or '')
@@ -1340,18 +1350,10 @@ def get_system_strategies():
                 cs_type = trading_config.get('cs_strategy_type') or 'single'
                 symbol_list = trading_config.get('symbol_list') or []
 
-            # Format timestamps
+            # Timestamps are emitted as UTC ISO by SafeJSONProvider — pass
+            # datetime objects straight through.
             created_at = s.get('created_at')
             updated_at = s.get('updated_at')
-            if hasattr(created_at, 'isoformat'):
-                created_at = created_at.isoformat()
-            if hasattr(updated_at, 'isoformat'):
-                updated_at = updated_at.isoformat()
-
-            # Format position timestamps
-            for p in positions:
-                if hasattr(p.get('updated_at'), 'isoformat'):
-                    p['updated_at'] = p['updated_at'].isoformat()
 
             items.append({
                 'id': sid,
@@ -1567,18 +1569,12 @@ def get_admin_orders():
 
         items = []
         for row in rows:
+            # SafeJSONProvider normalizes datetimes to UTC ISO; no manual
+            # conversion needed.
             created_at = row.get('created_at')
             paid_at = row.get('paid_at')
             confirmed_at = row.get('confirmed_at')
             expires_at = row.get('expires_at')
-            if hasattr(created_at, 'isoformat'):
-                created_at = created_at.isoformat()
-            if hasattr(paid_at, 'isoformat'):
-                paid_at = paid_at.isoformat()
-            if hasattr(confirmed_at, 'isoformat'):
-                confirmed_at = confirmed_at.isoformat()
-            if hasattr(expires_at, 'isoformat'):
-                expires_at = expires_at.isoformat()
 
             items.append({
                 'id': row['id'],
@@ -1785,30 +1781,19 @@ def get_admin_ai_stats():
             cur.close()
 
         # Build per-user items
+        from app.utils.timeutil import to_utc_iso
+
         user_items = []
         for row in user_rows:
             uid = row.get('user_id')
             if not uid:  # Skip rows with NULL user_id
                 continue
-                
+
             ms = memory_stats_map.get(uid, {})
-            last_at = row.get('last_analysis_at')
-            first_at = row.get('first_analysis_at')
-            
-            # Convert datetime to ISO format string if needed
-            if last_at and hasattr(last_at, 'isoformat'):
-                last_at = last_at.isoformat()
-            elif last_at:
-                last_at = str(last_at)
-            else:
-                last_at = None
-                
-            if first_at and hasattr(first_at, 'isoformat'):
-                first_at = first_at.isoformat()
-            elif first_at:
-                first_at = str(first_at)
-            else:
-                first_at = None
+            # Server stores naive TIMESTAMP in container TZ; emit UTC ISO so the
+            # browser can render it in the user's locale correctly.
+            last_at = to_utc_iso(row.get('last_analysis_at'))
+            first_at = to_utc_iso(row.get('first_analysis_at'))
 
             user_items.append({
                 'user_id': int(uid),
@@ -1832,24 +1817,9 @@ def get_admin_ai_stats():
             user_id = row.get('user_id')
             if not user_id:  # Skip rows with NULL user_id
                 continue
-                
-            created_at = row.get('created_at')
-            completed_at = row.get('completed_at')
-            
-            # Convert datetime to ISO format string if needed
-            if created_at and hasattr(created_at, 'isoformat'):
-                created_at = created_at.isoformat()
-            elif created_at:
-                created_at = str(created_at)
-            else:
-                created_at = None
-                
-            if completed_at and hasattr(completed_at, 'isoformat'):
-                completed_at = completed_at.isoformat()
-            elif completed_at:
-                completed_at = str(completed_at)
-            else:
-                completed_at = None
+
+            created_at = to_utc_iso(row.get('created_at'))
+            completed_at = to_utc_iso(row.get('completed_at'))
 
             recent_items.append({
                 'id': int(row.get('id') or 0),

@@ -2,7 +2,7 @@
 健康检查路由
 """
 from flask import Blueprint, jsonify
-from datetime import datetime
+from datetime import datetime, timezone
 
 health_bp = Blueprint('health', __name__)
 
@@ -14,7 +14,8 @@ def index():
         'name': 'QuantDinger Python API',
         'version': '2.0.0',
         'status': 'running',
-        'timestamp': datetime.now().isoformat()
+        # SafeJSONProvider serializes datetimes as UTC ISO (with Z).
+        'timestamp': datetime.now(timezone.utc)
     })
 
 
@@ -23,7 +24,7 @@ def health_check():
     """健康检查"""
     return jsonify({
         'status': 'healthy',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now(timezone.utc)
     })
 
 

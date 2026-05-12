@@ -17,6 +17,7 @@ notification_config = {
 
 from __future__ import annotations
 
+import base64
 import html
 import hmac
 import hashlib
@@ -24,6 +25,7 @@ import json
 import os
 import smtplib
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,6 +38,239 @@ from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ============================================================
+# Webhook dialect detection & payload adaptation
+# ============================================================
+#
+# QuantDinger's webhook channel was originally generic: it POSTed our
+# own JSON schema (event/strategy/instrument/signal/order/...) to whatever
+# URL the user supplied. That works fine for self-hosted automation
+# endpoints, but most users actually point this at a group-chat bot —
+# Feishu/Lark, DingTalk, WeCom, Slack. Those bots reject any envelope
+# that isn't theirs and (worse for Feishu/DingTalk/WeCom) typically
+# return HTTP 200 with an error body, making the failure silent: the
+# user clicks "Test", sees a success toast, and nothing arrives in the
+# group.
+#
+# The helpers below auto-detect the dialect from the URL host and
+# translate our payload into the vendor's required schema. For
+# generic/self-hosted URLs we keep emitting the original schema so
+# existing integrations keep working untouched.
+
+_WEBHOOK_DIALECT_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ('feishu', (
+        'open.feishu.cn/open-apis/bot/v2/hook/',
+        'open.larksuite.com/open-apis/bot/v2/hook/',
+        'open.larkoffice.com/open-apis/bot/v2/hook/',
+        'www.larksuite.com/open-apis/bot/v2/hook/',
+    )),
+    ('dingtalk', ('oapi.dingtalk.com/robot/send',)),
+    ('wecom', ('qyapi.weixin.qq.com/cgi-bin/webhook/send',)),
+    ('slack', ('hooks.slack.com/services/',)),
+)
+
+
+def _detect_webhook_dialect(url: str) -> str:
+    """
+    Sniff the URL and return the vendor dialect name, or 'generic' for
+    self-hosted endpoints. Keep the prefix check substring-based so
+    minor URL variations (regional subdomains, query suffixes) still
+    match.
+    """
+    u = (url or '').lower()
+    for dialect, prefixes in _WEBHOOK_DIALECT_PATTERNS:
+        if any(p in u for p in prefixes):
+            return dialect
+    return 'generic'
+
+
+def _shorten(s: str, limit: int = 4000) -> str:
+    s = str(s or '')
+    return s if len(s) <= limit else (s[:limit] + '…')
+
+
+def _build_webhook_text(payload: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Distill our internal payload into (title, body) plain text suitable
+    for forwarding to a group-chat bot. We deliberately do NOT trust
+    the bot to render arbitrary HTML — Feishu accepts markdown only in
+    "post"/"interactive" envelopes, not in "text". Markdown bullets are
+    kept lightweight (newline-separated key/value pairs) so they look
+    OK in every vendor that supports text or markdown.
+    """
+    p = payload or {}
+
+    explicit_title = str(p.get('title') or '').strip()
+    explicit_msg = str(p.get('message') or '').strip()
+    if explicit_title or explicit_msg:
+        return (explicit_title or 'QuantDinger'), (explicit_msg or '')
+
+    strategy = p.get('strategy') or {}
+    instrument = p.get('instrument') or {}
+    sig = p.get('signal') or {}
+    order = p.get('order') or {}
+
+    sname = str(strategy.get('name') or '').strip()
+    sym = str(instrument.get('symbol') or '').strip()
+    stype = str(sig.get('type') or sig.get('action') or '').strip()
+    side = str(sig.get('side') or '').strip()
+
+    title_bits: List[str] = []
+    if sname:
+        title_bits.append(sname)
+    if sym:
+        title_bits.append(sym)
+    if stype:
+        title_bits.append(stype.upper())
+    title = ' · '.join(title_bits) if title_bits else 'QuantDinger 信号'
+
+    body_lines: List[str] = []
+    if sname:
+        body_lines.append(f"策略: {sname}")
+    if sym:
+        body_lines.append(f"标的: {sym}")
+    if stype:
+        body_lines.append(f"信号: {stype}")
+    if side:
+        body_lines.append(f"方向: {side}")
+    try:
+        ref_price = float(order.get('ref_price') or 0)
+        if ref_price > 0:
+            body_lines.append(f"价格: {_fmt_float(ref_price)}")
+    except Exception:
+        pass
+    try:
+        stake = float(order.get('stake_amount') or 0)
+        if stake > 0:
+            body_lines.append(f"金额: {_fmt_float(stake)}")
+    except Exception:
+        pass
+    ts_iso = str(p.get('timestamp_iso') or '').strip()
+    if ts_iso:
+        body_lines.append(f"时间: {ts_iso}")
+
+    if not body_lines:
+        body_lines.append(_shorten(json.dumps(p, ensure_ascii=False), 800))
+
+    return title, "\n".join(body_lines)
+
+
+def _adapt_payload_for_dialect(dialect: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Translate the internal payload to the vendor's required JSON.
+
+    Each branch is documented inline because the field names differ
+    across platforms in ways that are easy to mis-remember:
+
+    - 飞书/Lark text 机器人: ``{msg_type: 'text', content: {text}}``
+    - 钉钉机器人 markdown:    ``{msgtype: 'markdown', markdown: {title, text}}``
+    - 企微/WeCom markdown:    ``{msgtype: 'markdown', markdown: {content}}``
+    - Slack incoming webhook: ``{text}``
+    """
+    title, body = _build_webhook_text(payload)
+
+    if dialect == 'feishu':
+        # Feishu/Lark text content cap is around 30k chars but the chat
+        # UI gets unreadable far before that; clamp at ~4k.
+        return {
+            "msg_type": "text",
+            "content": {"text": f"{title}\n{_shorten(body)}"},
+        }
+    if dialect == 'dingtalk':
+        # DingTalk markdown body must be non-empty *and* contain at
+        # least one of the keywords the bot was created with — but
+        # that's a user-config issue we can't fix here. The "###" prefix
+        # at least makes title visible.
+        return {
+            "msgtype": "markdown",
+            "markdown": {"title": _shorten(title, 64), "text": f"### {title}\n\n{_shorten(body)}"},
+        }
+    if dialect == 'wecom':
+        return {
+            "msgtype": "markdown",
+            "markdown": {"content": f"### {title}\n\n{_shorten(body, 4000)}"},
+        }
+    if dialect == 'slack':
+        return {"text": f"*{title}*\n{_shorten(body)}"}
+    return payload
+
+
+def _feishu_sign(secret: str, timestamp_str: str) -> str:
+    """
+    Feishu custom-bot signing algorithm.
+
+    Algorithm (per docs):
+      key = timestamp + "\\n" + secret  (utf-8)
+      digest = HMAC-SHA256(key, b"")
+      sign = base64(digest)
+
+    The timestamp and sign are then placed *inside* the JSON body, not
+    in headers. See:
+    https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot
+    """
+    key = f"{timestamp_str}\n{secret}".encode('utf-8')
+    digest = hmac.new(key, b"", hashlib.sha256).digest()
+    return base64.b64encode(digest).decode('utf-8')
+
+
+def _dingtalk_signed_url(url: str, secret: str) -> str:
+    """
+    DingTalk custom-bot signing.
+
+    Algorithm:
+      string_to_sign = timestamp_ms + "\\n" + secret
+      digest = HMAC-SHA256(secret, string_to_sign)
+      sign = url_encode(base64(digest))
+    Then append &timestamp=...&sign=... to the URL.
+    """
+    ts_ms = str(int(time.time() * 1000))
+    string_to_sign = f"{ts_ms}\n{secret}"
+    digest = hmac.new(secret.encode('utf-8'), string_to_sign.encode('utf-8'), hashlib.sha256).digest()
+    sign = urllib.parse.quote_plus(base64.b64encode(digest).decode('utf-8'))
+    sep = '&' if ('?' in url) else '?'
+    return f"{url}{sep}timestamp={ts_ms}&sign={sign}"
+
+
+def _check_vendor_response(dialect: str, status_code: int, text: str) -> Tuple[bool, str]:
+    """
+    Group-chat bots typically return HTTP 200 even on logical failures
+    (invalid signature, wrong msg_type, missing keyword, etc.) and put
+    the real result inside the JSON body. This checker normalises
+    that so a "silent failure" actually surfaces as an error to the
+    caller.
+
+    Vendor success codes:
+      - 飞书:   {"code": 0, "msg": "ok"} or {"StatusCode": 0}
+      - 钉钉:   {"errcode": 0, "errmsg": "ok"}
+      - 企微:   {"errcode": 0, "errmsg": "ok"}
+      - Slack:  plain text "ok" with HTTP 200
+    """
+    if status_code < 200 or status_code >= 300:
+        return False, f"http_{status_code}:{_shorten(text, 300)}"
+
+    body = (text or '').strip()
+    if dialect == 'slack':
+        return (body.lower() == 'ok' or body.startswith('{')), (
+            '' if (body.lower() == 'ok' or body.startswith('{')) else f"slack_unexpected:{_shorten(body, 300)}"
+        )
+
+    if dialect in ('feishu', 'dingtalk', 'wecom'):
+        if not body or not body.startswith('{'):
+            # Non-JSON 200 — vendor SDK still sometimes does this.
+            return True, ""
+        try:
+            obj = json.loads(body)
+        except Exception:
+            return True, ""
+        code = obj.get('code', obj.get('errcode', obj.get('StatusCode')))
+        if code in (0, '0', None):
+            return True, ""
+        msg = obj.get('msg') or obj.get('errmsg') or ''
+        return False, f"{dialect}_error:code={code}:{_shorten(msg, 200)}"
+
+    return True, ""
 
 
 def _as_list(value: Any) -> List[str]:
@@ -547,29 +782,47 @@ class SignalNotifier:
         signing_secret_override: Any = None,
     ) -> Tuple[bool, str]:
         """
-        Generic webhook delivery.
+        Webhook delivery with auto-detected vendor dialect.
 
-        用户在个人中心配置：
-        - webhook_url: Webhook 地址
-        - webhook_token: Bearer Token（可选）
+        URL hosts recognised automatically:
+          - 飞书/Lark   open.feishu.cn / open.larksuite.com / ...
+          - 钉钉机器人  oapi.dingtalk.com/robot/send
+          - 企微机器人  qyapi.weixin.qq.com/cgi-bin/webhook/send
+          - Slack       hooks.slack.com/services/...
+          - Generic     everything else (keeps QuantDinger's own schema)
 
-        支持功能：
-        - 自定义 headers: notification_config.targets.webhook_headers
-        - Bearer Token: notification_config.targets.webhook_token
-        - 签名验证: notification_config.targets.webhook_signing_secret
-        - 自动重试: 429/5xx 时重试一次
+        Per-strategy overrides via notification_config.targets:
+          - webhook_headers         dict / JSON string of extra headers
+          - webhook_token           Bearer token (Authorization header)
+          - webhook_signing_secret  signing secret. Semantics depend on
+                                    dialect:
+                                      * feishu  -> in-body timestamp/sign
+                                      * dingtalk -> URL query timestamp/sign
+                                      * generic  -> X-QD-Timestamp /
+                                                    X-QD-Signature headers
+                                      * wecom / slack -> ignored (those
+                                        platforms use a key embedded in
+                                        the URL itself)
+
+        Retries once on 429/5xx. Vendor 200-with-error-code responses
+        are surfaced as failures (see ``_check_vendor_response``).
         """
         if not url:
             return False, "missing_webhook_url"
         if not (str(url).startswith("http://") or str(url).startswith("https://")):
             return False, "invalid_webhook_url"
 
+        dialect = _detect_webhook_dialect(url)
+        adapted_payload = _adapt_payload_for_dialect(dialect, payload)
+
         headers: Dict[str, str] = {
             "Content-Type": "application/json",
             "User-Agent": "QuantDinger/1.0 (+https://www.quantdinger.com)",
         }
 
-        # Per-strategy header overrides (optional)
+        # Per-strategy header overrides (only meaningful for generic
+        # endpoints; vendor bots reject unknown headers either silently
+        # or with errors, so we still allow them but warn in logs).
         wh = headers_override
         if isinstance(wh, str) and wh.strip():
             try:
@@ -578,53 +831,96 @@ class SignalNotifier:
             except Exception:
                 wh = None
         if isinstance(wh, dict):
+            if dialect != 'generic':
+                logger.info(
+                    "webhook.headers_override.ignored_by_vendor dialect=%s keys=%s",
+                    dialect, list(wh.keys()),
+                )
             for k, v in wh.items():
                 kk = str(k or "").strip()
                 if not kk:
                     continue
                 headers[kk] = str(v if v is not None else "")
 
-        # Auth (user's token from notification_config.targets.webhook_token)
+        # Bearer token: Discord/Slack don't use it, Feishu/Dingtalk/WeCom
+        # have their own auth mechanism (secret or key-in-URL), so we
+        # only attach Authorization for generic endpoints.
         tok = str(token_override or "").strip()
-        if tok and "Authorization" not in headers:
+        if tok and dialect == 'generic' and "Authorization" not in headers:
             headers["Authorization"] = f"Bearer {tok}"
 
-        # Optional signing secret (per-strategy override, else env)
         signing_secret = str(signing_secret_override or "").strip() or (os.getenv("SIGNAL_WEBHOOK_SIGNING_SECRET") or "").strip()
-        if signing_secret:
+
+        # Vendor-specific signing rewrites either the URL (dingtalk) or
+        # the body (feishu). We accept failure here gracefully — if
+        # the user provided a secret but the algorithm fails, we fail
+        # loud rather than send unsigned.
+        post_url = url
+        post_body_bytes: Optional[bytes] = None
+        if signing_secret and dialect == 'feishu':
             try:
                 ts = str(int(time.time()))
-                body = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                sign = _feishu_sign(signing_secret, ts)
+                signed = dict(adapted_payload or {})
+                signed['timestamp'] = ts
+                signed['sign'] = sign
+                adapted_payload = signed
+            except Exception as e:
+                return False, f"feishu_sign_failed:{e}"
+        elif signing_secret and dialect == 'dingtalk':
+            try:
+                post_url = _dingtalk_signed_url(url, signing_secret)
+            except Exception as e:
+                return False, f"dingtalk_sign_failed:{e}"
+        elif signing_secret and dialect == 'generic':
+            # Original QuantDinger contract: body-bound HMAC-SHA256 hex
+            # written to X-QD-Signature with X-QD-Timestamp. We send
+            # raw bytes so the signed string matches exactly what is
+            # transmitted (json.dumps doing different whitespace).
+            try:
+                ts = str(int(time.time()))
+                body = json.dumps(adapted_payload or {}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 sig_base = (ts + ".").encode("utf-8") + body
                 sig = hmac.new(signing_secret.encode("utf-8"), sig_base, hashlib.sha256).hexdigest()
                 headers["X-QD-Timestamp"] = ts
                 headers["X-QD-Signature"] = sig
-                # Send raw bytes so signature matches what we sign.
-                def _post_once(timeout: float) -> requests.Response:
-                    return requests.post(url, data=body, headers=headers, timeout=timeout)
+                post_body_bytes = body
             except Exception as e:
                 return False, f"webhook_signing_failed:{e}"
-        else:
-            def _post_once(timeout: float) -> requests.Response:
-                return requests.post(url, json=payload, headers=headers, timeout=timeout)
+        # wecom/slack: no signing — secret embedded in URL already.
 
-        # Post with minimal retry on 429/5xx
+        def _post_once(timeout: float) -> requests.Response:
+            if post_body_bytes is not None:
+                return requests.post(post_url, data=post_body_bytes, headers=headers, timeout=timeout)
+            return requests.post(post_url, json=adapted_payload, headers=headers, timeout=timeout)
+
         try:
             resp = _post_once(self.timeout_sec)
-            if 200 <= resp.status_code < 300:
+            ok, err = _check_vendor_response(dialect, resp.status_code, resp.text)
+            if ok:
                 return True, ""
-            if resp.status_code in (429, 500, 502, 503, 504):
+
+            should_retry = resp.status_code in (429, 500, 502, 503, 504)
+            if should_retry:
                 try:
                     time.sleep(1.0)
                 except Exception:
                     pass
                 resp2 = _post_once(self.timeout_sec)
-                if 200 <= resp2.status_code < 300:
+                ok2, err2 = _check_vendor_response(dialect, resp2.status_code, resp2.text)
+                if ok2:
                     return True, ""
-                return False, f"http_{resp2.status_code}:{(resp2.text or '')[:300]}"
-            return False, f"http_{resp.status_code}:{(resp.text or '')[:300]}"
+                return False, err2
+
+            return False, err
+        except requests.exceptions.Timeout:
+            logger.warning("webhook.timeout dialect=%s", dialect)
+            return False, "timeout"
+        except requests.exceptions.ConnectionError as e:
+            logger.warning("webhook.connection_error dialect=%s err=%s", dialect, str(e)[:200])
+            return False, f"connection_error:{_shorten(str(e), 200)}"
         except Exception as e:
-            logger.exception("webhook.error")
+            logger.exception("webhook.error dialect=%s", dialect)
             return False, str(e)
 
     def _notify_discord(self, *, url: str, payload: Dict[str, Any], fallback_text: str) -> Tuple[bool, str]:
@@ -892,6 +1188,16 @@ class SignalNotifier:
                 elif c == "webhook":
                     url = str((targets or {}).get("webhook") or "").strip()
                     tok = str((targets or {}).get("webhook_token") or "").strip()
+                    sec = str(
+                        (targets or {}).get("webhook_signing_secret")
+                        or (targets or {}).get("webhookSigningSecret")
+                        or ""
+                    ).strip()
+                    # The payload we pass downstream uses the same
+                    # title/message contract as the strategy-signal
+                    # path so vendor dialect adaptation (Feishu /
+                    # DingTalk / WeCom / Slack) can extract a clean
+                    # human-readable message — see _build_webhook_text.
                     wh_payload = {
                         "event": "qd.profile_test",
                         "title": title,
@@ -899,7 +1205,12 @@ class SignalNotifier:
                         "timestamp": now,
                         "timestamp_iso": iso,
                     }
-                    ok, err = self._notify_webhook(url=url, payload=wh_payload, token_override=tok or None)
+                    ok, err = self._notify_webhook(
+                        url=url,
+                        payload=wh_payload,
+                        token_override=tok or None,
+                        signing_secret_override=sec or None,
+                    )
                 else:
                     ok, err = False, f"unsupported_channel:{c}"
             except Exception as e:

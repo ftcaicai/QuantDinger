@@ -1040,60 +1040,71 @@ class PolymarketDataSource:
     
     def _fetch_market_by_slug(self, slug: str) -> Optional[Dict]:
         """
-        直接通过slug查询市场（最高效的方式）
-        根据Polymarket API文档：https://docs.polymarket.com/market-data/fetching-markets
-        可以使用 /markets?slug=xxx 直接查询
+        通过slug精确查询单个市场。
+
+        Polymarket的 `polymarket.com/event/<slug>` URL中，<slug>可能是：
+          - 某个市场的slug（单市场事件常见，如Como Serie A）→ /markets?slug=xxx 命中
+          - 某个事件的slug（多市场事件，如MicroStrategy）→ /events?slug=xxx 命中，事件下有多个markets
+        因此必须同时尝试两个端点。返回 None 表示该slug在Polymarket上不存在，
+        调用方应直接报错，不要回退到模糊搜索。
         """
+        if not slug:
+            return None
+        slug_lower = slug.lower().strip()
+
         try:
-            # 方法1: 尝试通过markets端点直接查询slug
-            url = f"{self.gamma_api}/markets"
-            params = {"slug": slug, "limit": 10}
-            logger.info(f"Fetching market by slug from Gamma API: {url} with params: {params}")
-            response = self.session.get(url, params=params, timeout=10)
-            
+            # 1. 先用 /markets?slug=xxx —— 当slug就是market slug时命中
+            response = self.session.get(
+                f"{self.gamma_api}/markets",
+                params={"slug": slug, "limit": 10},
+                timeout=10,
+            )
             if response.status_code == 200:
                 data = response.json()
-                if isinstance(data, list) and len(data) > 0:
-                    # 解析返回的市场数据
-                    markets = self._parse_gamma_events(data)
-                    # 精确匹配slug
-                    for market in markets:
-                        market_slug = market.get("slug", "").lower()
-                        if market_slug == slug.lower() or slug.lower() in market_slug:
-                            logger.info(f"Found market by slug: {slug}")
-                            return market
-                    # 如果没有精确匹配，返回第一个
-                    if markets:
-                        logger.info(f"Found market by slug (fuzzy match): {slug}")
-                        return markets[0]
-                elif isinstance(data, dict):
-                    # 单个市场对象
-                    markets = self._parse_gamma_events([data])
-                    if markets:
-                        logger.info(f"Found market by slug: {slug}")
-                        return markets[0]
-            
-            # 方法2: 尝试通过events端点查询（events可能包含slug信息）
-            url = f"{self.gamma_api}/events"
-            params = {"active": "true", "closed": "false", "limit": 100}
-            response = self.session.get(url, params=params, timeout=10)
-            
+                raw_markets = data if isinstance(data, list) else [data] if isinstance(data, dict) and data else []
+                # /markets 返回的是 market 对象，_parse_gamma_events 会把"无markets字段但有question的对象"当作单市场事件处理
+                for raw in raw_markets:
+                    if (raw.get("slug") or "").lower() == slug_lower:
+                        parsed = self._parse_gamma_events([raw])
+                        if parsed:
+                            logger.info(f"Found market via /markets?slug={slug}")
+                            return parsed[0]
+            else:
+                logger.debug(f"/markets?slug={slug} returned status {response.status_code}")
+
+            # 2. 再用 /events?slug=xxx —— 当slug是event slug（含多市场事件）时命中
+            response = self.session.get(
+                f"{self.gamma_api}/events",
+                params={"slug": slug, "limit": 5},
+                timeout=10,
+            )
             if response.status_code == 200:
                 data = response.json()
                 events = data if isinstance(data, list) else (data.get("data", []) if isinstance(data, dict) else [])
-                
-                # 在返回的事件中查找匹配的slug
                 for event in events:
-                    event_slug = (event.get("slug") or "").lower()
-                    if event_slug == slug.lower() or slug.lower() in event_slug:
+                    if (event.get("slug") or "").lower() != slug_lower:
+                        continue
+                    sub_markets = event.get("markets") or []
+                    # 优先选slug与event slug匹配的子市场（通常是"主"市场），否则取第一个
+                    chosen = next(
+                        (m for m in sub_markets if (m.get("slug") or "").lower() == slug_lower),
+                        sub_markets[0] if sub_markets else None,
+                    )
+                    if chosen is None:
+                        # event 直接当成单市场来解析
                         parsed = self._parse_gamma_events([event])
-                        if parsed:
-                            logger.info(f"Found market by slug via events: {slug}")
-                            return parsed[0]
-            
-            logger.warning(f"Market with slug '{slug}' not found via direct query")
+                    else:
+                        # 把选中的market作为"event"传进去，让_parse_gamma_events把它当作单市场对象处理
+                        parsed = self._parse_gamma_events([chosen])
+                    if parsed:
+                        logger.info(f"Found market via /events?slug={slug} (event has {len(sub_markets)} markets)")
+                        return parsed[0]
+            else:
+                logger.debug(f"/events?slug={slug} returned status {response.status_code}")
+
+            logger.warning(f"Slug '{slug}' not found on Polymarket via /markets or /events")
             return None
-            
+
         except Exception as e:
             logger.error(f"Failed to fetch market by slug {slug}: {e}", exc_info=True)
             return None

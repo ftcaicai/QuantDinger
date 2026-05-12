@@ -1,7 +1,7 @@
 """Health and self-introspection endpoints (class R, but token-free for /health)."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import jsonify
 
@@ -24,7 +24,8 @@ def health():
         "service": "quantdinger-agent-gateway",
         "version": "v1",
         "status": "ok",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        # SafeJSONProvider serializes datetimes as UTC ISO (with Z).
+        "timestamp": datetime.now(timezone.utc),
     }), 200
 
 

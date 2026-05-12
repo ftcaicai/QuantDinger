@@ -74,8 +74,242 @@ def _refresh_runtime_services() -> None:
 #   - 部署级配置（host/port/debug）不在 UI 暴露，用户通过 .env 或 docker-compose 设置
 #   - 内部调优参数（超时/重试/tick间隔/向量维度等）使用默认值即可，不暴露给普通用户
 #   - 只保留用户真正需要配置的功能开关和 API Key
+# - 频繁用到的开关、Key 放在 "常用" tab；冷门的限频/calibration 等放在 "高级" tab
+#   (由 ADVANCED_KEYS 集合控制，避免给每一项手动加字段)
 # ---------------------------------------------------------------
+
+# Keys that should land in the "Advanced" tab of the Settings page.  Anything
+# not listed here defaults to the "Basic" tab.  Keep this list small and
+# intentional — only put truly rarely changed knobs here so the basic tab stays
+# useful for day-to-day operators.
+ADVANCED_KEYS = {
+    # AI tuning
+    'OPENROUTER_TEMPERATURE',
+    'AI_ANALYSIS_CONSENSUS_TIMEFRAMES',
+    'AI_CODE_GEN_MODEL',
+    'OPENAI_BASE_URL', 'DEEPSEEK_BASE_URL', 'GROK_BASE_URL', 'MINIMAX_BASE_URL',
+    # Trading internals
+    'MAKER_WAIT_SEC',
+    # Agent gateway (operator-level)
+    'AGENT_JOBS_MAX_WORKERS', 'AGENT_LIVE_TRADING_ENABLED', 'QUANTDINGER_DEPLOYMENT_MODE',
+    'ENABLE_PENDING_ORDER_WORKER', 'DISABLE_RESTORE_RUNNING_STRATEGIES',
+    # OAuth advanced
+    'OAUTH_ALLOWED_REDIRECTS', 'OAUTH_STATE_TTL_MINUTES',
+    'GOOGLE_REDIRECT_URI', 'GITHUB_REDIRECT_URI',
+    # Security rate-limit / verification code tuning
+    'SECURITY_IP_MAX_ATTEMPTS', 'SECURITY_IP_WINDOW_MINUTES', 'SECURITY_IP_BLOCK_MINUTES',
+    'SECURITY_ACCOUNT_MAX_ATTEMPTS', 'SECURITY_ACCOUNT_WINDOW_MINUTES', 'SECURITY_ACCOUNT_BLOCK_MINUTES',
+    'VERIFICATION_CODE_EXPIRE_MINUTES', 'VERIFICATION_CODE_RATE_LIMIT',
+    'VERIFICATION_CODE_IP_HOURLY_LIMIT', 'VERIFICATION_CODE_MAX_ATTEMPTS',
+    'VERIFICATION_CODE_LOCK_MINUTES',
+    # AI reflection / calibration
+    'REFLECTION_WORKER_INTERVAL_SEC', 'REFLECTION_MIN_AGE_DAYS', 'REFLECTION_VALIDATE_LIMIT',
+    'AI_CALIBRATION_MARKETS', 'AI_CALIBRATION_LOOKBACK_DAYS', 'AI_CALIBRATION_MIN_SAMPLES',
+    # USDT pay internals
+    'USDT_PAY_CHAIN', 'USDT_TRC20_CONTRACT', 'TRONGRID_BASE_URL',
+    'USDT_PAY_CONFIRM_SECONDS', 'USDT_PAY_EXPIRE_MINUTES',
+    # Adanos sentiment
+    'ADANOS_SENTIMENT_SOURCE', 'ADANOS_API_BASE_URL',
+    # Brand internals
+    'BRAND_FAVICON_URL',
+    'BRAND_LEGAL_USER_AGREEMENT_TEXT', 'BRAND_LEGAL_PRIVACY_POLICY_TEXT',
+}
+
+
 CONFIG_SCHEMA = {
+
+    # ==================== 0. 品牌 / 联系方式 / 法律 ====================
+    # Frontend reads these via /api/settings/brand-config (no auth) so logos,
+    # social links, version label and legal modals can be rebranded without
+    # touching the Vue source.
+    'brand': {
+        'title': 'Brand & Identity',
+        'icon': 'crown',
+        'order': 0,
+        'items': [
+            {
+                'key': 'BRAND_APP_NAME',
+                'label': 'App Name',
+                'type': 'text',
+                'default': 'QuantDinger',
+                'description': 'Product name shown in the browser tab title and footer copyright.'
+            },
+            {
+                'key': 'BRAND_APP_VERSION',
+                'label': 'App Version',
+                'type': 'text',
+                'default': '3.0.3',
+                'description': 'Version label shown in the sidebar footer ("V3.0.3"). Frontend bundle version stays unchanged.'
+            },
+            {
+                'key': 'BRAND_COPYRIGHT',
+                'label': 'Footer Copyright',
+                'type': 'text',
+                'default': '© 2025-2026 QuantDinger. All rights reserved.',
+                'description': 'Plain-text copyright line shown at the bottom of every page.'
+            },
+            {
+                'key': 'BRAND_LOGO_LIGHT_URL',
+                'label': 'Logo URL (Light theme)',
+                'type': 'text',
+                'required': False,
+                'description': 'Public URL to a wide logo for the light theme. Recommended size 240x60 px (PNG / SVG / WebP, ~4:1 aspect ratio, transparent background). Leave empty to use the bundled default (src/assets/logo.png).'
+            },
+            {
+                'key': 'BRAND_LOGO_DARK_URL',
+                'label': 'Logo URL (Dark theme)',
+                'type': 'text',
+                'required': False,
+                'description': 'Public URL to a wide logo for the dark theme. Recommended size 240x60 px (PNG / SVG / WebP, ~4:1 aspect ratio, transparent background). Leave empty to use the bundled logo_w.png.'
+            },
+            {
+                'key': 'BRAND_LOGO_COLLAPSED_URL',
+                'label': 'Logo URL (Collapsed sidebar)',
+                'type': 'text',
+                'required': False,
+                'description': 'Public URL to a square / mark-only logo shown when the sidebar is collapsed. Recommended size 64x64 px (PNG / SVG, 1:1 aspect ratio).'
+            },
+            {
+                'key': 'BRAND_FAVICON_URL',
+                'label': 'Favicon URL',
+                'type': 'text',
+                'required': False,
+                'description': 'Public URL to the browser tab icon. Recommended size 32x32 px (PNG or ICO).'
+            },
+        ]
+    },
+
+    # ==================== 0b. 联系方式（运营常改）====================
+    'contact': {
+        'title': 'Contact & Support',
+        'icon': 'customer-service',
+        'order': 0,
+        'items': [
+            {
+                'key': 'BRAND_CONTACT_EMAIL',
+                'label': 'Support Email',
+                'type': 'text',
+                'default': 'brokermr810@gmail.com',
+                'description': 'Public support email shown in the sidebar footer (mailto:).'
+            },
+            {
+                'key': 'BRAND_CONTACT_SUPPORT_URL',
+                'label': 'Support / Help URL',
+                'type': 'text',
+                'default': 'https://t.me/quantdinger',
+                'description': 'Link target for the "Support" footer item (Telegram group, ticket portal, etc.).'
+            },
+            {
+                'key': 'BRAND_CONTACT_LIVE_CHAT_URL',
+                'label': 'Live Chat URL',
+                'type': 'text',
+                'default': 'https://t.me/quantdinger',
+                'description': 'Link target for the "Live Chat" footer item.'
+            },
+            {
+                'key': 'BRAND_CONTACT_FEATURE_REQUEST_URL',
+                'label': 'Feature Request URL',
+                'type': 'text',
+                'default': 'https://github.com/brokermr810/QuantDinger/issues',
+                'description': 'Where to send users who want to file an issue or feature request.'
+            },
+        ]
+    },
+
+    # ==================== 0c. 社交账户（固定 5 个槽）====================
+    'social': {
+        'title': 'Social Accounts',
+        'icon': 'team',
+        'order': 0,
+        'items': [
+            {
+                'key': 'BRAND_SOCIAL_GITHUB',
+                'label': 'GitHub URL',
+                'type': 'text',
+                'required': False,
+                'description': 'Leave empty to hide this icon in the sidebar footer.'
+            },
+            {
+                'key': 'BRAND_SOCIAL_X',
+                'label': 'X (Twitter) URL',
+                'type': 'text',
+                'required': False,
+                'description': 'Leave empty to hide this icon in the sidebar footer.'
+            },
+            {
+                'key': 'BRAND_SOCIAL_DISCORD',
+                'label': 'Discord URL',
+                'type': 'text',
+                'required': False,
+                'description': 'Leave empty to hide this icon in the sidebar footer.'
+            },
+            {
+                'key': 'BRAND_SOCIAL_TELEGRAM',
+                'label': 'Telegram URL',
+                'type': 'text',
+                'required': False,
+                'description': 'Leave empty to hide this icon in the sidebar footer.'
+            },
+            {
+                'key': 'BRAND_SOCIAL_YOUTUBE',
+                'label': 'YouTube URL',
+                'type': 'text',
+                'required': False,
+                'description': 'Leave empty to hide this icon in the sidebar footer.'
+            },
+        ]
+    },
+
+    # ==================== 0d. 用户协议 / 隐私 / 移动 App ====================
+    'legal': {
+        'title': 'Legal & Mobile App',
+        'icon': 'safety-certificate',
+        'order': 0,
+        'items': [
+            {
+                'key': 'BRAND_LEGAL_USER_AGREEMENT_URL',
+                'label': 'User Agreement URL',
+                'type': 'text',
+                'required': False,
+                'description': 'External Terms of Service URL. Takes priority — when set, the "User Agreement" link opens in a new tab. Leave empty to use inline text or the built-in default copy.'
+            },
+            {
+                'key': 'BRAND_LEGAL_USER_AGREEMENT_TEXT',
+                'label': 'User Agreement (inline text)',
+                'type': 'text',
+                'required': False,
+                'description': 'Inline Terms of Service text shown in the modal. Used only when the URL above is empty.'
+            },
+            {
+                'key': 'BRAND_LEGAL_PRIVACY_POLICY_URL',
+                'label': 'Privacy Policy URL',
+                'type': 'text',
+                'required': False,
+                'description': 'External privacy policy URL. URL takes priority over inline text.'
+            },
+            {
+                'key': 'BRAND_LEGAL_PRIVACY_POLICY_TEXT',
+                'label': 'Privacy Policy (inline text)',
+                'type': 'text',
+                'required': False,
+                'description': 'Inline privacy policy text shown in the modal. Used only when the URL above is empty.'
+            },
+            {
+                'key': 'MOBILE_APP_LATEST_VERSION',
+                'label': 'Mobile App Latest Version',
+                'type': 'text',
+                'required': False,
+                'description': 'Semver-like version string for the in-app upgrade prompt. Leave empty to disable the prompt.'
+            },
+            {
+                'key': 'MOBILE_APP_DOWNLOAD_URL',
+                'label': 'Mobile App Download URL',
+                'type': 'text',
+                'required': False,
+                'description': 'APK / install page URL surfaced when the mobile app reports an old version.'
+            },
+        ]
+    },
 
     # ==================== 1. 安全认证 ====================
     'auth': {
@@ -417,6 +651,34 @@ CONFIG_SCHEMA = {
                 'default': '10',
                 'description': 'Wait time for limit order fill before switching to market order'
             },
+            {
+                'key': 'ALLOW_LOCAL_DESKTOP_BROKERS',
+                'label': 'Allow IBKR / MT5 (local desktop brokers)',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'Disable on a multi-tenant SaaS deployment so users see a clear "broker not supported" message instead of broken connect flows. Crypto exchange API keys are unaffected.'
+            },
+            {
+                'key': 'SHOW_CN_STOCK',
+                'label': 'Show A-Share (CN Stock) in market picker',
+                'type': 'boolean',
+                'default': 'False',
+                'description': 'Whether to expose the A-Share (CNStock) market type in frontend pickers. Strategy/data code stays intact either way.'
+            },
+            {
+                'key': 'ENABLE_PENDING_ORDER_WORKER',
+                'label': 'Enable Pending Order Worker',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'Background worker that syncs broker positions, manages pending limit orders, and triggers strategy auto-stop on fatal errors. Disable only when running multiple API replicas where another node already runs the worker.'
+            },
+            {
+                'key': 'DISABLE_RESTORE_RUNNING_STRATEGIES',
+                'label': 'Disable Auto-Restore Strategies on Boot',
+                'type': 'boolean',
+                'default': 'False',
+                'description': 'When False, strategies running before a server restart are automatically resumed. Set to True only if you want to inspect state on next boot before any strategy resumes trading.'
+            },
         ]
     },
 
@@ -479,6 +741,29 @@ CONFIG_SCHEMA = {
                 'link': 'https://twelvedata.com/apikey',
                 'link_text': 'settings.link.getApiKey',
                 'description': 'Twelve Data API key for CN/HK stock K-lines (free 800 credits/day)'
+            },
+            {
+                'key': 'ADANOS_API_KEY',
+                'label': 'Adanos API Key',
+                'type': 'password',
+                'required': False,
+                'link': 'https://adanos.org',
+                'link_text': 'settings.link.getApiKey',
+                'description': 'Adanos market sentiment API key. Leave empty to disable the US-stock sentiment widget.'
+            },
+            {
+                'key': 'ADANOS_SENTIMENT_SOURCE',
+                'label': 'Adanos Sentiment Source',
+                'type': 'text',
+                'default': 'reddit',
+                'description': 'Sentiment source channel (reddit, etc.). See Adanos docs for valid values.'
+            },
+            {
+                'key': 'ADANOS_API_BASE_URL',
+                'label': 'Adanos API Base URL',
+                'type': 'text',
+                'default': 'https://api.adanos.org',
+                'description': 'Adanos API endpoint. Change only if you have a self-hosted or mirrored instance.'
             },
         ]
     },
@@ -579,6 +864,33 @@ CONFIG_SCHEMA = {
         'icon': 'experiment',
         'order': 7,
         'items': [
+            # Agent Gateway (/api/agent/v1) deployment knobs
+            {
+                'key': 'AGENT_LIVE_TRADING_ENABLED',
+                'label': 'Agent Live Trading',
+                'type': 'boolean',
+                'default': 'False',
+                'description': 'Hard kill switch for live trading from agent tokens. When False, T-class agent calls always record paper orders even if the token allows live mode.'
+            },
+            {
+                'key': 'QUANTDINGER_DEPLOYMENT_MODE',
+                'label': 'Deployment Mode',
+                'type': 'select',
+                'options': [
+                    {'value': '', 'label': 'Single-tenant / self-hosted'},
+                    {'value': 'saas', 'label': 'SaaS / hosted (force paper_only)'},
+                    {'value': 'hosted', 'label': 'Hosted (alias of saas)'},
+                ],
+                'default': '',
+                'description': 'Set to "saas" on multi-tenant hosted instances. This force-pins agent tokens to paper_only and refuses any T-scope token issuance.'
+            },
+            {
+                'key': 'AGENT_JOBS_MAX_WORKERS',
+                'label': 'Agent Jobs Max Workers',
+                'type': 'number',
+                'default': '4',
+                'description': 'Thread pool size for async agent jobs (backtests, experiment pipelines).'
+            },
             {
                 'key': 'ENABLE_REFLECTION_WORKER',
                 'label': 'Enable Auto Reflection',
@@ -689,6 +1001,20 @@ CONFIG_SCHEMA = {
                 'description': 'Frontend URL for OAuth redirects'
             },
             {
+                'key': 'OAUTH_ALLOWED_REDIRECTS',
+                'label': 'Extra OAuth Redirect Targets',
+                'type': 'text',
+                'required': False,
+                'description': 'Comma-separated scheme+host (+ optional port) of additional frontends allowed as OAuth post-login redirect targets, e.g. https://m.quantdinger.com,https://app.quantdinger.com. FRONTEND_URL is always allowed implicitly.'
+            },
+            {
+                'key': 'OAUTH_STATE_TTL_MINUTES',
+                'label': 'OAuth State TTL (min)',
+                'type': 'number',
+                'default': '20',
+                'description': 'OAuth CSRF state token lifetime in minutes. Clamped to [5,120].'
+            },
+            {
                 'key': 'TURNSTILE_SITE_KEY',
                 'label': 'Turnstile Site Key',
                 'type': 'text',
@@ -721,6 +1047,13 @@ CONFIG_SCHEMA = {
                 'description': 'Google OAuth Client Secret'
             },
             {
+                'key': 'GOOGLE_REDIRECT_URI',
+                'label': 'Google OAuth Redirect URI',
+                'type': 'text',
+                'required': False,
+                'description': 'Must match the redirect URI registered in your Google Cloud Console. Typically <api-host>/api/auth/oauth/google/callback.'
+            },
+            {
                 'key': 'GITHUB_CLIENT_ID',
                 'label': 'GitHub OAuth Client ID',
                 'type': 'text',
@@ -735,6 +1068,92 @@ CONFIG_SCHEMA = {
                 'type': 'password',
                 'required': False,
                 'description': 'GitHub OAuth Client Secret'
+            },
+            {
+                'key': 'GITHUB_REDIRECT_URI',
+                'label': 'GitHub OAuth Redirect URI',
+                'type': 'text',
+                'required': False,
+                'description': 'Must match the callback URL configured for your GitHub OAuth app. Typically <api-host>/api/auth/oauth/github/callback.'
+            },
+
+            # ===== Login / verification-code rate limiting (advanced) =====
+            {
+                'key': 'SECURITY_IP_MAX_ATTEMPTS',
+                'label': 'IP Lockout: Max Attempts',
+                'type': 'number',
+                'default': '10',
+                'description': 'How many failed login attempts from one IP before blocking. Advanced — tune only if you face credential-stuffing.'
+            },
+            {
+                'key': 'SECURITY_IP_WINDOW_MINUTES',
+                'label': 'IP Lockout: Window (min)',
+                'type': 'number',
+                'default': '5',
+                'description': 'Time window used to count failed attempts from an IP.'
+            },
+            {
+                'key': 'SECURITY_IP_BLOCK_MINUTES',
+                'label': 'IP Lockout: Block (min)',
+                'type': 'number',
+                'default': '15',
+                'description': 'How long to block an IP after the threshold is hit.'
+            },
+            {
+                'key': 'SECURITY_ACCOUNT_MAX_ATTEMPTS',
+                'label': 'Account Lockout: Max Attempts',
+                'type': 'number',
+                'default': '5',
+                'description': 'How many failed logins for a single account before locking it.'
+            },
+            {
+                'key': 'SECURITY_ACCOUNT_WINDOW_MINUTES',
+                'label': 'Account Lockout: Window (min)',
+                'type': 'number',
+                'default': '60',
+                'description': 'Time window for counting failed logins per account.'
+            },
+            {
+                'key': 'SECURITY_ACCOUNT_BLOCK_MINUTES',
+                'label': 'Account Lockout: Block (min)',
+                'type': 'number',
+                'default': '30',
+                'description': 'How long an account stays locked after exceeding attempts.'
+            },
+            {
+                'key': 'VERIFICATION_CODE_EXPIRE_MINUTES',
+                'label': 'Verification Code Expiry (min)',
+                'type': 'number',
+                'default': '10',
+                'description': 'How long an email / SMS verification code is valid.'
+            },
+            {
+                'key': 'VERIFICATION_CODE_RATE_LIMIT',
+                'label': 'Verification Code Rate Limit (sec)',
+                'type': 'number',
+                'default': '60',
+                'description': 'Minimum seconds between two verification-code requests for the same target.'
+            },
+            {
+                'key': 'VERIFICATION_CODE_IP_HOURLY_LIMIT',
+                'label': 'Verification Code IP Hourly Limit',
+                'type': 'number',
+                'default': '10',
+                'description': 'Maximum verification codes one IP may request per hour.'
+            },
+            {
+                'key': 'VERIFICATION_CODE_MAX_ATTEMPTS',
+                'label': 'Verification Code Max Attempts',
+                'type': 'number',
+                'default': '5',
+                'description': 'Wrong verification-code attempts allowed before locking.'
+            },
+            {
+                'key': 'VERIFICATION_CODE_LOCK_MINUTES',
+                'label': 'Verification Code Lock (min)',
+                'type': 'number',
+                'default': '30',
+                'description': 'How long to block code submissions after the attempt limit is hit.'
             },
         ]
     },
@@ -979,6 +1398,21 @@ def write_env_file(env_values):
         return False
 
 
+def _schema_with_advanced_flags():
+    """Return a deep-ish copy of CONFIG_SCHEMA with ``is_advanced`` annotated on
+    every item according to ``ADVANCED_KEYS``. Lets the frontend split settings
+    into a Basic / Advanced tab without each item needing a manual flag."""
+    annotated = {}
+    for group_key, group in CONFIG_SCHEMA.items():
+        items = []
+        for item in group.get('items', []):
+            new_item = dict(item)
+            new_item['is_advanced'] = item['key'] in ADVANCED_KEYS
+            items.append(new_item)
+        annotated[group_key] = {**group, 'items': items}
+    return annotated
+
+
 @settings_bp.route('/schema', methods=['GET'])
 @login_required
 @admin_required
@@ -987,7 +1421,7 @@ def get_settings_schema():
     return jsonify({
         'code': 1,
         'msg': 'success',
-        'data': CONFIG_SCHEMA
+        'data': _schema_with_advanced_flags()
     })
 
 
@@ -1000,6 +1434,93 @@ def get_public_config():
         'code': 1,
         'data': {
             'ccxt_default_exchange': (CCXTConfig.DEFAULT_EXCHANGE or 'binance').lower(),
+        }
+    })
+
+
+# Default brand values. Used when the matching ENV var is empty or absent so a
+# fresh install still ships with sane copy / links instead of blanks.
+_BRAND_DEFAULTS = {
+    'app_name': 'QuantDinger',
+    'app_version': '3.0.3',
+    'copyright': '© 2025-2026 QuantDinger. All rights reserved.',
+    'contact_email': 'brokermr810@gmail.com',
+    'contact_support_url': 'https://t.me/quantdinger',
+    'contact_feature_request_url': 'https://github.com/brokermr810/QuantDinger/issues',
+    'contact_live_chat_url': 'https://t.me/quantdinger',
+    'social_github': 'https://github.com/brokermr810/QuantDinger',
+    'social_x': 'https://x.com/quantdinger_en',
+    'social_discord': 'https://discord.com/invite/tyx5B6TChr',
+    'social_telegram': 'https://t.me/quantdinger',
+    'social_youtube': 'https://youtube.com/@quantdinger',
+}
+
+
+def _brand_env(name: str, default: str = '') -> str:
+    """Read a BRAND_* env var and fall back to the bundled default."""
+    value = os.getenv(name, '')
+    if value is None:
+        value = ''
+    value = value.strip()
+    if value:
+        return value
+    return _BRAND_DEFAULTS.get(default, '')
+
+
+@settings_bp.route('/brand-config', methods=['GET'])
+def get_brand_config():
+    """Public, no-auth endpoint exposing branding / legal / contact info.
+
+    Drives the frontend's logo, footer, social links, legal modals and version
+    label entirely from backend ENV vars so operators can rebrand a deployment
+    by editing ``.env`` (or the Settings page) — no frontend rebuild required.
+
+    Empty ENV values fall back to the bundled QuantDinger defaults so a fresh
+    install still ships with working links instead of blanks.
+    """
+    social_specs = [
+        ('GitHub', 'github', 'BRAND_SOCIAL_GITHUB', 'social_github'),
+        ('X', 'x', 'BRAND_SOCIAL_X', 'social_x'),
+        ('Discord', 'discord', 'BRAND_SOCIAL_DISCORD', 'social_discord'),
+        ('Telegram', 'telegram', 'BRAND_SOCIAL_TELEGRAM', 'social_telegram'),
+        ('YouTube', 'youtube', 'BRAND_SOCIAL_YOUTUBE', 'social_youtube'),
+    ]
+    social_accounts = []
+    for name, icon, env_key, default_key in social_specs:
+        url = _brand_env(env_key, default_key)
+        if url:
+            social_accounts.append({'name': name, 'icon': icon, 'url': url})
+
+    return jsonify({
+        'code': 1,
+        'msg': 'success',
+        'data': {
+            'app_name': _brand_env('BRAND_APP_NAME', 'app_name'),
+            'app_version': _brand_env('BRAND_APP_VERSION', 'app_version'),
+            'copyright': _brand_env('BRAND_COPYRIGHT', 'copyright'),
+            'logos': {
+                'light': _brand_env('BRAND_LOGO_LIGHT_URL'),
+                'dark': _brand_env('BRAND_LOGO_DARK_URL'),
+                'collapsed': _brand_env('BRAND_LOGO_COLLAPSED_URL'),
+                'favicon': _brand_env('BRAND_FAVICON_URL'),
+            },
+            'contact': {
+                'email': _brand_env('BRAND_CONTACT_EMAIL', 'contact_email'),
+                'support_url': _brand_env('BRAND_CONTACT_SUPPORT_URL', 'contact_support_url'),
+                'feature_request_url': _brand_env('BRAND_CONTACT_FEATURE_REQUEST_URL', 'contact_feature_request_url'),
+                'live_chat_url': _brand_env('BRAND_CONTACT_LIVE_CHAT_URL', 'contact_live_chat_url'),
+            },
+            'social_accounts': social_accounts,
+            'legal': {
+                'user_agreement_url': _brand_env('BRAND_LEGAL_USER_AGREEMENT_URL'),
+                'user_agreement_text': _brand_env('BRAND_LEGAL_USER_AGREEMENT_TEXT'),
+                'privacy_policy_url': _brand_env('BRAND_LEGAL_PRIVACY_POLICY_URL'),
+                'privacy_policy_text': _brand_env('BRAND_LEGAL_PRIVACY_POLICY_TEXT'),
+            },
+            'mobile_app': {
+                'latest_version': _brand_env('MOBILE_APP_LATEST_VERSION'),
+                'download_url': _brand_env('MOBILE_APP_DOWNLOAD_URL'),
+            },
         }
     })
 

@@ -27,7 +27,7 @@ hardened mode by deployment configuration.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.utils.agent_auth import (
     ALL_SCOPES,
@@ -59,6 +59,13 @@ def _is_saas_mode() -> bool:
 
 
 def _normalize_expiry(days: int | None) -> datetime | None:
+    """Return an *aware* UTC datetime expires_at value.
+
+    psycopg2 will convert it to the server's TZ wall-clock when storing into
+    the ``TIMESTAMP WITHOUT TIME ZONE`` column, which keeps a single
+    "naive timestamp = server local wall-clock" rule across the whole DB and
+    lets ``SafeJSONProvider`` serialize it back to UTC ISO correctly.
+    """
     if not days:
         return None
     try:
@@ -67,7 +74,7 @@ def _normalize_expiry(days: int | None) -> datetime | None:
         return None
     if d <= 0:
         return None
-    return datetime.utcnow() + timedelta(days=d)
+    return datetime.now(timezone.utc) + timedelta(days=d)
 
 
 @agent_v1_bp.route("/admin/tokens", methods=["POST"])
@@ -164,8 +171,9 @@ def issue_token():
         "instruments": instruments,
         "paper_only": paper_only,
         "rate_limit_per_min": rate_limit,
-        "expires_at": (expires_at.isoformat() + "Z") if expires_at else None,
-        "created_at": row["created_at"].isoformat() + "Z" if row.get("created_at") else None,
+        # Datetimes go through SafeJSONProvider → UTC ISO (with Z).
+        "expires_at": expires_at,
+        "created_at": row.get("created_at"),
     }, message="issued")
 
 

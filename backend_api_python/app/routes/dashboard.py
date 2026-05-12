@@ -41,14 +41,18 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
 
 
 def _format_datetime(dt: Any) -> Any:
-    """Convert datetime object to ISO format string for JSON serialization."""
+    """Convert a datetime to a UTC ISO 8601 string for the frontend.
+
+    Naive datetimes from the DB are interpreted in the server's wall-clock
+    time zone (container ``TZ`` env var) — the previous implementation
+    assumed UTC, which is only correct on UTC deployments and silently
+    shifted timestamps by 8 hours on the default ``Asia/Shanghai`` setup.
+    """
     if dt is None:
         return None
     if hasattr(dt, 'isoformat'):
-        from datetime import timezone as _tz
-        if hasattr(dt, 'tzinfo') and getattr(dt, 'tzinfo', None) is None:
-            dt = dt.replace(tzinfo=_tz.utc)
-        return dt.isoformat()
+        from app.utils.timeutil import to_utc_iso
+        return to_utc_iso(dt)
     return dt
 
 
@@ -127,44 +131,78 @@ def _calc_pnl_percent(entry_price: float, size: float, pnl: float, leverage: flo
 def _compute_performance_stats(trades: List[Dict[str, Any]], initial_capital: float = 0.0) -> Dict[str, Any]:
     """
     Compute performance statistics from trade history.
+
+    Important: ``qd_strategy_trades`` stores one row per trade *event*, not per
+    round-trip. There are two kinds of rows:
+      * Opens / adds (``open_long``, ``open_short``, ``add_long`` …) — these
+        carry ``profit = NULL`` because no P&L is realised yet.
+      * Closes / reduces — these carry a signed numeric ``profit``.
+
+    Historically the win-rate denominator here was ``len(trades)``, which is
+    the count of *all* events including opens. That made a strategy with
+    "2 wins / 0 losses" display as ``2 / 11 events ≈ 18.2%`` win rate. The
+    correct denominator is the number of *decided* (closed and non-breakeven)
+    trades. To make every downstream metric consistent we now also restrict
+    profit-factor, averages, max-win/loss and the equity curve to the closing
+    trades, and report ``total_trades`` as the count of closing trades — open
+    rows are bookkeeping noise as far as performance scoring is concerned.
+
     Args:
-        trades: List of trade records
-        initial_capital: Initial capital for calculating equity curve (default: 0.0, will use cumulative profit peak as baseline)
+        trades: List of trade records (mix of opens and closes — both fine).
+        initial_capital: Initial capital for the equity curve; used to anchor
+            the drawdown percentage when the cumulative profit is negative.
+
     Returns: {
         total_trades, winning_trades, losing_trades, win_rate,
         total_profit, total_loss, profit_factor,
         avg_win, avg_loss, avg_trade,
-        max_win, max_loss, max_drawdown, max_drawdown_pct
+        max_win, max_loss, max_drawdown, max_drawdown_pct,
+        best_day, worst_day
     }
     """
-    total_trades = len(trades)
-    if total_trades == 0:
-        return {
-            "total_trades": 0,
-            "winning_trades": 0,
-            "losing_trades": 0,
-            "win_rate": 0.0,
-            "total_profit": 0.0,
-            "total_loss": 0.0,
-            "profit_factor": 0.0,
-            "avg_win": 0.0,
-            "avg_loss": 0.0,
-            "avg_trade": 0.0,
-            "max_win": 0.0,
-            "max_loss": 0.0,
-            "max_drawdown": 0.0,
-            "max_drawdown_pct": 0.0,
-            "best_day": 0.0,
-            "worst_day": 0.0,
-        }
+    empty_stats = {
+        "total_trades": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "win_rate": 0.0,
+        "total_profit": 0.0,
+        "total_loss": 0.0,
+        "profit_factor": 0.0,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "avg_trade": 0.0,
+        "max_win": 0.0,
+        "max_loss": 0.0,
+        "max_drawdown": 0.0,
+        "max_drawdown_pct": 0.0,
+        "best_day": 0.0,
+        "worst_day": 0.0,
+    }
+    if not trades:
+        return empty_stats
 
-    profits = [_safe_float(t.get("profit"), 0.0) for t in trades]
+    # Keep only rows that carry a realised P&L. ``profit`` being None is the
+    # canonical "this is an open / add event" signal in qd_strategy_trades;
+    # rows where the column is missing entirely (legacy / migrated data) get
+    # the same treatment. Explicit ``profit = 0`` rows are kept — they are
+    # break-even closes and still count toward total_trades / avg_trade, just
+    # not toward wins or losses.
+    closing_trades = [t for t in trades if t.get("profit") is not None]
+    total_trades = len(closing_trades)
+    if total_trades == 0:
+        return empty_stats
+
+    profits = [_safe_float(t.get("profit"), 0.0) for t in closing_trades]
     wins = [p for p in profits if p > 0]
     losses = [p for p in profits if p < 0]
 
     winning_trades = len(wins)
     losing_trades = len(losses)
-    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+    # The denominator must exclude break-even closes (profit == 0) because
+    # they are neither a win nor a loss and would otherwise drag the rate
+    # toward an arbitrary direction depending on rounding.
+    decided_trades = winning_trades + losing_trades
+    win_rate = (winning_trades / decided_trades * 100) if decided_trades > 0 else 0.0
 
     total_profit = sum(wins) if wins else 0.0
     total_loss = abs(sum(losses)) if losses else 0.0
@@ -221,9 +259,12 @@ def _compute_performance_stats(trades: List[Dict[str, Any]], initial_capital: fl
     if max_drawdown_pct > 10000:
         max_drawdown_pct = 10000.0
 
-    # Best/worst day
+    # Best/worst day — only closing trades carry realised P&L, so iterate over
+    # the same filtered set we used above. Open events with profit=NULL would
+    # otherwise create empty "0 P&L" days for the date they were opened, which
+    # is technically harmless but masks days that legitimately had no trades.
     day_profits: Dict[str, float] = {}
-    for t in trades:
+    for t in closing_trades:
         ts = _safe_int(t.get("created_at"), 0)
         if ts <= 0:
             continue
@@ -393,7 +434,12 @@ def summary():
             )
 
         # Recent trades (best-effort, filtered by user_id)
-        # Also compute all-time trade count for dashboard top cards.
+        # Also compute all-time trade count for dashboard top cards. We count
+        # only *closing* trades (``profit IS NOT NULL``) so this card agrees
+        # with the per-strategy "Trades" column and with the win-rate
+        # denominator — otherwise users see e.g. "11 trades, 18% win rate"
+        # on the top card while a strategy shows "2 trades, 100% win rate",
+        # and naturally assume one of them is broken.
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
@@ -404,6 +450,7 @@ def summary():
                 WHERE t.user_id = ?
                   AND s.user_id = ?
                   AND COALESCE(LOWER(TRIM(s.strategy_mode)), 'signal') <> 'bot'
+                  AND t.profit IS NOT NULL
                 """,
                 (user_id, user_id)
             )

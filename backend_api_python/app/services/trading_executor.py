@@ -22,7 +22,7 @@ import numpy as np
 from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
 from app.utils.strategy_runtime_logs import append_strategy_log
-from app.data_sources import DataSourceFactory
+from app.data_sources import DataSourceFactory, UnsupportedMarketError
 from app.services.kline import KlineService
 from app.services.indicator_params import IndicatorParamsParser, IndicatorCaller
 from app.services.strategy_script_runtime import (
@@ -797,6 +797,64 @@ class TradingExecutor:
         logger.info(f"Strategy {strategy_id} loop starting")
         self._console_print(f"[strategy:{strategy_id}] loop initializing")
         
+        # Auto-stop policy: prevent endless error spam when a strategy is no longer runnable
+        # (expired API keys, delisted symbols, SaaS禁止本机券商等).
+        try:
+            max_consecutive_errors = int(os.getenv("STRATEGY_MAX_CONSECUTIVE_ERRORS", "5"))
+        except Exception:
+            max_consecutive_errors = 5
+        if max_consecutive_errors < 1:
+            max_consecutive_errors = 1
+        consecutive_errors = 0
+        exit_reason: str = ""
+
+        def _set_db_stopped_best_effort(reason: str) -> None:
+            """Best-effort: mark strategy stopped to avoid zombie 'running' status."""
+            try:
+                with get_db_connection() as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "UPDATE qd_strategies_trading SET status = 'stopped' WHERE id = %s AND status = 'running'",
+                        (int(strategy_id),),
+                    )
+                    db.commit()
+                    cur.close()
+            except Exception:
+                pass
+            try:
+                if reason:
+                    append_strategy_log(strategy_id, "error", f"Auto-stopped: {reason}")
+            except Exception:
+                pass
+
+        def _is_fatal_error(err: Exception, msg: str) -> bool:
+            # Config errors from data sources should stop immediately.
+            if isinstance(err, UnsupportedMarketError):
+                return True
+            m = (msg or "").lower()
+            if not m:
+                return False
+            # IBKR/MT5 disabled in SaaS/cloud installs.
+            if "disabled ibkr/mt5" in m or "已关闭 ibkr / mt5" in msg:
+                return True
+            # Common auth/permission failures (API key expired/invalid).
+            fatal_tokens = [
+                "invalid api", "api key", "apikey", "secret", "signature",
+                "authentication", "unauthorized", "forbidden", "permission",
+                "invalid_key", "invalid key",
+            ]
+            if any(t in m for t in fatal_tokens):
+                return True
+            # Symbol/product not found (delisted / not supported).
+            symbol_tokens = [
+                "symbol not found", "unknown symbol", "invalid symbol",
+                "instrument not found", "product not found", "does not exist",
+                "delist", "delisted", "not supported",
+            ]
+            if any(t in m for t in symbol_tokens):
+                return True
+            return False
+
         try:
             # 加载策略配置
             strategy = self._load_strategy(strategy_id)
@@ -1103,6 +1161,16 @@ class TradingExecutor:
                     current_price = self._fetch_current_price(exchange, symbol, market_type=market_type, market_category=market_category)
                     if current_price is None:
                         logger.warning(f"Strategy {strategy_id} failed to fetch current price for {market_category}:{symbol}")
+                        consecutive_errors += 1
+                        if consecutive_errors >= max_consecutive_errors:
+                            exit_reason = (
+                                f"failed to fetch price for {market_category}:{symbol} "
+                                f"({consecutive_errors}/{max_consecutive_errors})"
+                            )
+                            logger.error(f"Strategy {strategy_id} {exit_reason}; stopping")
+                            self._console_print(f"[strategy:{strategy_id}] auto-stopping: {exit_reason}")
+                            _set_db_stopped_best_effort(exit_reason)
+                            break
                         continue
 
                     # ============================================
@@ -1464,15 +1532,36 @@ class TradingExecutor:
                         f"[strategy:{strategy_id}] tick price={float(current_price or 0.0):.8f} pending_signals={len(pending_signals or [])}"
                     )
                     # Tick heartbeat kept for console only; no longer persisted to qd_strategy_logs.
+
+                    # Successful tick: reset consecutive error counter.
+                    consecutive_errors = 0
                     
                 except Exception as e:
-                    logger.error(f"Strategy {strategy_id} loop error: {str(e)}")
+                    msg = str(e)
+                    consecutive_errors += 1
+                    logger.error(f"Strategy {strategy_id} loop error ({consecutive_errors}/{max_consecutive_errors}): {msg}")
                     logger.error(traceback.format_exc())
                     self._console_print(f"[strategy:{strategy_id}] loop error: {e}")
                     try:
                         append_strategy_log(strategy_id, "error", f"Loop error: {e}")
                     except Exception:
                         pass
+
+                    fatal = _is_fatal_error(e, msg)
+                    if fatal or consecutive_errors >= max_consecutive_errors:
+                        if fatal and isinstance(e, UnsupportedMarketError):
+                            exit_reason = (
+                                f"Unsupported market type: {getattr(e, 'market', '')}. "
+                                f"Please set strategy market_category/market to one of: "
+                                f"Crypto/USStock/CNStock/HKStock/Forex/Futures/MOEX."
+                            )
+                        else:
+                            exit_reason = msg if fatal else f"too many consecutive errors: {consecutive_errors}/{max_consecutive_errors}"
+                        logger.error(f"Strategy {strategy_id} auto-stopping due to {'fatal error' if fatal else 'error threshold'}: {exit_reason}")
+                        self._console_print(f"[strategy:{strategy_id}] auto-stopping: {exit_reason}")
+                        _set_db_stopped_best_effort(exit_reason)
+                        break
+
                     time.sleep(5)
                     
         except Exception as e:
@@ -1483,11 +1572,28 @@ class TradingExecutor:
                 append_strategy_log(strategy_id, "error", f"Strategy thread fatal error: {e}")
             except Exception:
                 pass
+            # Ensure DB state doesn't stay "running" on fatal crash.
+            try:
+                exit_reason = exit_reason or f"thread fatal error: {e}"
+                _set_db_stopped_best_effort(exit_reason)
+            except Exception:
+                pass
         finally:
             # 清理
             with self.lock:
                 if strategy_id in self.running_strategies:
                     del self.running_strategies[strategy_id]
+            # If the thread exited but DB still says running, mark it stopped to avoid zombie status.
+            try:
+                with get_db_connection() as db:
+                    cur = db.cursor()
+                    cur.execute("SELECT status FROM qd_strategies_trading WHERE id = %s", (int(strategy_id),))
+                    row = cur.fetchone() or {}
+                    cur.close()
+                if (row.get("status") or "").strip().lower() == "running":
+                    _set_db_stopped_best_effort(exit_reason or "strategy thread exited")
+            except Exception:
+                pass
             self._console_print(f"[strategy:{strategy_id}] loop exited")
             logger.info(f"Strategy {strategy_id} loop exited")
             try:

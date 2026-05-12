@@ -240,6 +240,9 @@ class PostgresCursor:
     def __init__(self, cursor):
         self._cursor = cursor
         self._last_insert_id = None
+        # INSERT ... RETURNING: execute() peeks the first row for lastrowid; callers
+        # that also cur.fetchone() must see the same row (not a second fetch from PG).
+        self._buffered_row: Optional[Dict[str, Any]] = None
     
     def _convert_placeholders(self, query: str) -> str:
         """
@@ -272,6 +275,8 @@ class PostgresCursor:
         if args is not None and not isinstance(args, (tuple, list)):
             args = (args,)
 
+        self._buffered_row = None
+
         is_insert = query.strip().upper().startswith('INSERT')
         has_returning = 'RETURNING' in query.upper()
 
@@ -279,7 +284,8 @@ class PostgresCursor:
             q_with_id = query.rstrip(';').rstrip() + ' RETURNING id'
             savepoint = '_pg_ins_ret_id'
             try:
-                self._cursor.execute(f"SAVEPOINT {savepoint}")
+                # Constant savepoint name; avoid SQL formatting.
+                self._cursor.execute("SAVEPOINT _pg_ins_ret_id")
             except Exception:
                 savepoint = None
 
@@ -296,7 +302,7 @@ class PostgresCursor:
                     pass
                 if savepoint:
                     try:
-                        self._cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
+                        self._cursor.execute("RELEASE SAVEPOINT _pg_ins_ret_id")
                     except Exception:
                         pass
                 return result
@@ -313,7 +319,7 @@ class PostgresCursor:
                     raise
                 if savepoint:
                     try:
-                        self._cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                        self._cursor.execute("ROLLBACK TO SAVEPOINT _pg_ins_ret_id")
                     except Exception:
                         pass
                 # Retry without RETURNING id.  Leaves _last_insert_id as None.
@@ -330,15 +336,22 @@ class PostgresCursor:
         if is_insert and has_returning:
             try:
                 row = self._cursor.fetchone()
-                if row and 'id' in row:
-                    self._last_insert_id = row['id']
+                if row is not None:
+                    self._buffered_row = row if isinstance(row, dict) else dict(row)
+                    if "id" in self._buffered_row:
+                        self._last_insert_id = self._buffered_row["id"]
             except Exception:
+                self._buffered_row = None
                 pass
 
         return result
     
     def fetchone(self) -> Optional[Dict[str, Any]]:
         """Fetch single row"""
+        if self._buffered_row is not None:
+            row = self._buffered_row
+            self._buffered_row = None
+            return row
         row = self._cursor.fetchone()
         if row is None:
             return None

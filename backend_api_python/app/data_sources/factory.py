@@ -5,6 +5,7 @@
 from typing import Dict, List, Any, Optional
 
 from app.data_sources.base import BaseDataSource
+from app.data_sources.errors import UnsupportedMarketError
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -107,7 +108,7 @@ class DataSourceFactory:
             from app.data_sources.moex import MOEXDataSource
             return MOEXDataSource()
         else:
-            raise ValueError(f"不支持的市场类型: {market}")
+            raise UnsupportedMarketError(market)
     
     @classmethod
     def get_kline(

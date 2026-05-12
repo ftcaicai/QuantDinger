@@ -2,6 +2,7 @@
 QuantDinger Python API - Flask application factory.
 """
 import math
+import os
 import logging
 import traceback
 
@@ -152,13 +153,18 @@ def start_usdt_order_worker():
 def restore_running_strategies():
     """
     Restore running strategies on startup.
-    Local deployment: only restores IndicatorStrategy.
     """
     import os
     # You can disable auto-restore to avoid starting many threads on low-resource hosts.
     if os.getenv('DISABLE_RESTORE_RUNNING_STRATEGIES', 'false').lower() == 'true':
         logger.info("Startup strategy restore is disabled via DISABLE_RESTORE_RUNNING_STRATEGIES")
         return
+
+    # Avoid running twice with Flask reloader (local debug mode).
+    debug = os.getenv("PYTHON_API_DEBUG", "false").lower() == "true"
+    if debug:
+        if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+            return
     try:
         from app.services.strategy import StrategyService
         
@@ -179,12 +185,8 @@ def restore_running_strategies():
             strategy_type = strategy_info.get('strategy_type', '')
             
             try:
-                if strategy_type and strategy_type != 'IndicatorStrategy':
-                    logger.info(f"Skip restore unsupported strategy type: id={strategy_id}, type={strategy_type}")
-                    continue
-
                 success = trading_executor.start_strategy(strategy_id)
-                strategy_type_name = 'IndicatorStrategy'
+                strategy_type_name = strategy_type or 'Strategy'
                 
                 if success:
                     restored_count += 1
@@ -224,10 +226,32 @@ def create_app(config_name='default'):
     app.json = SafeJSONProvider(app)
 
     app.config['JSON_AS_ASCII'] = False
-    
-    CORS(app)
-    
+
+    # CORS — pin to specific origins instead of '*'. FRONTEND_URL accepts a
+    # comma-separated list (e.g. "http://localhost:8888,http://localhost:8000")
+    # so dev and prod frontends can both be allowed. Default covers the docker
+    # frontend port (8888) and the Vue dev server port (8000).
+    _cors_origins = [
+        o.strip() for o in os.getenv(
+            "FRONTEND_URL",
+            "http://localhost:8888,http://localhost:8000",
+        ).split(",")
+        if o.strip()
+    ]
+    CORS(app, origins=_cors_origins)
+    logger.info(f"CORS allowed origins: {_cors_origins}")
+
     setup_logger()
+
+    # ib_insync uses asyncio across Flask + worker threads; without this, IBKR
+    # sockets often drop within seconds (nested loop / thread handoff issues).
+    try:
+        from ib_insync import util as _ib_util
+
+        _ib_util.patchAsyncio()
+        logger.info("ib_insync: patchAsyncio enabled for stable IBKR connections")
+    except Exception as _ib_exc:
+        logger.debug(f"ib_insync patchAsyncio skipped (ib_insync not installed?): {_ib_exc}")
     
     # Initialize database and ensure admin user exists
     try:

@@ -133,7 +133,7 @@ def place_order():
             return envelope({
                 "duplicate": True,
                 "previous": existing.get("result"),
-            }, message="idempotent replay"), 200
+            }, message="idempotent replay")
 
     # Live trading is hard-gated. Even with paper_only=false on the token, the
     # operator must enable AGENT_LIVE_TRADING_ENABLED to actually route to

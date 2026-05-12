@@ -8,6 +8,13 @@
 - 防封禁策略 (rate_limiter)
 """
 from app.data_sources.factory import DataSourceFactory
+from app.data_sources.errors import DataSourceError, UnsupportedMarketError
+
+__all__ = [
+    "DataSourceFactory",
+    "DataSourceError",
+    "UnsupportedMarketError",
+]
 from app.data_sources.circuit_breaker import (
     CircuitBreaker,
     get_realtime_circuit_breaker

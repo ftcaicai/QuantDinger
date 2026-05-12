@@ -44,7 +44,7 @@ def submit_pipeline():
                 "job_id": existing["job_id"],
                 "status": existing["status"],
                 "duplicate": True,
-            }, message="idempotent replay"), 200
+            }, message="idempotent replay")
 
     payload = dict(body)
     payload["__user_id"] = current_user_id()
@@ -59,7 +59,7 @@ def submit_pipeline():
         request_payload=payload,
         runner=_run,
     )
-    return envelope(job, message="queued"), 202
+    return envelope(job, message="queued", status=202)
 
 
 @agent_v1_bp.route("/experiments/structured-tune", methods=["POST"])
@@ -83,7 +83,7 @@ def submit_structured_tune():
         request_payload=payload,
         runner=_run,
     )
-    return envelope(job, message="queued"), 202
+    return envelope(job, message="queued", status=202)
 
 
 @agent_v1_bp.route("/experiments/ai-optimize", methods=["POST"])
@@ -118,4 +118,4 @@ def submit_ai_optimize():
         request_payload=payload,
         runner=_run,
     )
-    return envelope(job, message="queued"), 202
+    return envelope(job, message="queued", status=202)

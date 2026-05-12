@@ -1,6 +1,8 @@
 """Read-class market data endpoints."""
 from __future__ import annotations
 
+import os
+
 from app.data.market_symbols_seed import (
     get_hot_symbols as seed_get_hot_symbols,
     search_symbols as seed_search_symbols,
@@ -21,6 +23,8 @@ _kline_service = KlineService()
 
 _MARKETS = [
     {"value": "USStock",  "label": "US Stocks"},
+    # Hidden by default (same reason as /api/market/types): prebuilt frontend in this repo.
+    # Set SHOW_CN_STOCK=true to expose via the Agent API too.
     {"value": "CNStock",  "label": "China A-shares"},
     {"value": "HKStock",  "label": "HK Stocks"},
     {"value": "Crypto",   "label": "Crypto"},
@@ -38,7 +42,10 @@ def list_markets():
     The base catalog is platform-wide; the response is filtered by the token's
     `markets` allowlist so agents can self-discover their effective surface.
     """
+    show_cn_stock = str(os.getenv("SHOW_CN_STOCK", "false")).strip().lower() in ("1", "true", "yes", "on")
     visible = [m for m in _MARKETS if market_allowed(m["value"])]
+    if not show_cn_stock:
+        visible = [m for m in visible if m.get("value") != "CNStock"]
     return envelope(visible)
 
 

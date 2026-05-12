@@ -192,9 +192,9 @@ class AICalibrationService:
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
-                # Use f-string for interval since Postgres doesn't allow placeholder in INTERVAL literal
+                lookback_days_int = int(lookback_days)
                 cur.execute(
-                    f"""
+                    """
                     SELECT
                         decision,
                         consensus_score,
@@ -207,9 +207,9 @@ class AICalibrationService:
                       AND validated_at IS NOT NULL
                       AND actual_return_pct IS NOT NULL
                       AND consensus_score IS NOT NULL
-                      AND created_at > NOW() - INTERVAL '{int(lookback_days)} days'
+                      AND created_at > NOW() - (%s || ' days')::interval
                     """,
-                    (market,),
+                    (market, lookback_days_int),
                 )
                 rows = cur.fetchall() or []
                 cur.close()

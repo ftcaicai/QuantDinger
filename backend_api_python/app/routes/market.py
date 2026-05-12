@@ -93,8 +93,13 @@ def get_public_config():
 @market_bp.route('/types', methods=['GET'])
 def get_market_types():
     """Return supported market types for the add-watchlist modal."""
-    # Keep a stable UX order; add CN/HK stocks near US stocks.
-    desired_order = ['USStock', 'CNStock', 'HKStock', 'MOEX', 'Crypto', 'Forex', 'Futures']
+    import os
+    # Hide China A-shares in UI by default (frontend source is prebuilt in this repo).
+    # To re-enable: set SHOW_CN_STOCK=true.
+    show_cn_stock = str(os.getenv("SHOW_CN_STOCK", "false")).strip().lower() in ("1", "true", "yes", "on")
+
+    # Keep a stable UX order; CN/HK near US; MOEX last (niche vs crypto/FX/futures).
+    desired_order = ['USStock', 'CNStock', 'HKStock', 'Crypto', 'Forex', 'Futures', 'MOEX']
     order_rank = {v: i for i, v in enumerate(desired_order)}
 
     def _normalize_item(x):
@@ -132,6 +137,9 @@ def get_market_types():
         data = _sort_items(data)
     else:
         data = _sort_items(desired_order)
+
+    if not show_cn_stock:
+        data = [it for it in (data or []) if (it.get("value") if isinstance(it, dict) else None) != "CNStock"]
     return jsonify({'code': 1, 'msg': 'success', 'data': data})
 
 

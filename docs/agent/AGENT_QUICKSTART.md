@@ -99,7 +99,7 @@ curl -s -X POST http://localhost:8888/api/agent/v1/backtests \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: ma-cross-2024-q1-001" \
   -d '{
-        "code": "output = {\"signal\": df[\"close\"] > df[\"close\"].rolling(20).mean()}",
+        "code": "fast = SMA(close, 10)\nslow = SMA(close, 30)\ndf[\"buy\"]  = CROSSOVER(fast, slow).fillna(False).astype(bool)\ndf[\"sell\"] = CROSSUNDER(fast, slow).fillna(False).astype(bool)",
         "market": "Crypto",
         "symbol": "BTC/USDT",
         "timeframe": "1D",
@@ -119,6 +119,61 @@ When `status` becomes `succeeded`, the backtest result is in `result`.
 
 The `Idempotency-Key` header makes retries safe: the second call with the
 same key returns the original job instead of submitting a duplicate.
+
+### 4.1 The `code` parameter contract
+
+`code` is a **Python script** that the backend executes inside a sandbox.
+The script must mutate the pre-bound `df` DataFrame to add boolean signal
+columns. It is **not** a function, callable, or expression that returns
+signals — those shapes will fail validation in `_simulate_trading`.
+
+**Pre-bound names** in the exec environment:
+
+| Name | Type | Notes |
+|------|------|-------|
+| `df` | `pd.DataFrame` | Columns: `time, open, high, low, close, volume`. Mutate in place. |
+| `open`, `high`, `low`, `close`, `volume` | `pd.Series` | Convenience handles for the columns above |
+| `np`, `pd` | modules | Standard NumPy / pandas |
+| `params` | `dict` | Indicator params parsed from `# @param` comments + caller overrides |
+| `call_indicator(...)` | callable | Invoke another saved indicator from this script |
+| `SMA, EMA, RSI, MACD, BOLL, ATR, CROSSOVER, CROSSUNDER` | callables | Built-in technical helpers (see `app/services/backtest.py::_get_indicator_functions`) |
+
+**Required output** — the script must add **either** of these to `df`:
+
+| Style | Required columns | When to use |
+|-------|------------------|-------------|
+| 2-way (recommended) | `df['buy']`, `df['sell']` (boolean Series) | Most strategies — simple long-only or `trade_direction='both'` |
+| 4-way (advanced) | `df['open_long']`, `df['close_long']`, `df['open_short']`, `df['close_short']` (boolean Series) | When you need explicit control over each leg |
+
+Minimal working SMA crossover:
+
+```python
+fast = SMA(close, 10)
+slow = SMA(close, 30)
+df['buy']  = CROSSOVER(fast, slow).fillna(False).astype(bool)
+df['sell'] = CROSSUNDER(fast, slow).fillna(False).astype(bool)
+```
+
+Trend-pullback with RSI filter (parameterized):
+
+```python
+# @param fast_len int 20 Fast EMA length
+# @param slow_len int 50 Slow EMA length
+# @param rsi_floor float 45 Min RSI for long entry
+
+ema_fast = EMA(close, params['fast_len'])
+ema_slow = EMA(close, params['slow_len'])
+rsi = RSI(close, 14)
+
+raw_buy  = (ema_fast > ema_slow) & (rsi >= params['rsi_floor'])
+raw_sell = (ema_fast < ema_slow)
+
+df['buy']  = (raw_buy.fillna(False)  & (~raw_buy.shift(1).fillna(False))).astype(bool)
+df['sell'] = (raw_sell.fillna(False) & (~raw_sell.shift(1).fillna(False))).astype(bool)
+```
+
+See `docs/STRATEGY_DEV_GUIDE.md` for the full indicator-authoring guide,
+including TP/SL/trailing-stop hooks (`# @strategy ...` comments).
 
 ### 4.1 Stream partial results (SSE)
 

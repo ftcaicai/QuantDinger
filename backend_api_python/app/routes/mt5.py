@@ -5,8 +5,13 @@ Provides REST API for MT5 trading operations.
 """
 
 from flask import Blueprint, request, jsonify
+from app.utils.auth import login_required
 
 from app.utils.logger import get_logger
+from app.utils.local_brokers import (
+    local_desktop_brokers_allowed,
+    desktop_broker_cloud_reject_message,
+)
 
 logger = get_logger(__name__)
 
@@ -46,9 +51,16 @@ def _get_client():
 # ==================== Connection Management ====================
 
 @mt5_bp.route("/status", methods=["GET"])
+@login_required
 def get_status():
     """Get MT5 connection status."""
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({
+                "connected": False,
+                "error": desktop_broker_cloud_reject_message(),
+            }), 403
+
         _ensure_mt5_imports()
         client = _get_client()
         status = client.get_connection_status()
@@ -65,6 +77,7 @@ def get_status():
 
 
 @mt5_bp.route("/connect", methods=["POST"])
+@login_required
 def connect():
     """
     Connect to MT5 terminal.
@@ -80,6 +93,12 @@ def connect():
     global _client
     
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({
+                "success": False,
+                "error": desktop_broker_cloud_reject_message(),
+            }), 403
+
         _ensure_mt5_imports()
         
         data = request.get_json() or {}
@@ -138,11 +157,18 @@ def connect():
 
 
 @mt5_bp.route("/disconnect", methods=["POST"])
+@login_required
 def disconnect():
     """Disconnect from MT5 terminal."""
     global _client
     
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({
+                "success": False,
+                "error": desktop_broker_cloud_reject_message(),
+            }), 403
+
         if _client is not None:
             _client.disconnect()
             _client = None
@@ -155,9 +181,13 @@ def disconnect():
 # ==================== Account Queries ====================
 
 @mt5_bp.route("/account", methods=["GET"])
+@login_required
 def get_account():
     """Get account information."""
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 403
+
         client = _get_client()
         if not client.connected:
             return jsonify({"success": False, "error": "Not connected to MT5"}), 400
@@ -170,9 +200,13 @@ def get_account():
 
 
 @mt5_bp.route("/positions", methods=["GET"])
+@login_required
 def get_positions():
     """Get open positions."""
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 403
+
         client = _get_client()
         if not client.connected:
             return jsonify({"success": False, "error": "Not connected to MT5"}), 400
@@ -186,9 +220,13 @@ def get_positions():
 
 
 @mt5_bp.route("/orders", methods=["GET"])
+@login_required
 def get_orders():
     """Get pending orders."""
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 403
+
         client = _get_client()
         if not client.connected:
             return jsonify({"success": False, "error": "Not connected to MT5"}), 400
@@ -202,9 +240,13 @@ def get_orders():
 
 
 @mt5_bp.route("/symbols", methods=["GET"])
+@login_required
 def get_symbols():
     """Get available symbols."""
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 403
+
         client = _get_client()
         if not client.connected:
             return jsonify({"success": False, "error": "Not connected to MT5"}), 400
@@ -220,6 +262,7 @@ def get_symbols():
 # ==================== Trading ====================
 
 @mt5_bp.route("/order", methods=["POST"])
+@login_required
 def place_order():
     """
     Place an order.
@@ -234,6 +277,9 @@ def place_order():
     }
     """
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 403
+
         client = _get_client()
         if not client.connected:
             return jsonify({"success": False, "error": "Not connected to MT5"}), 400
@@ -296,6 +342,7 @@ def place_order():
 
 
 @mt5_bp.route("/close", methods=["POST"])
+@login_required
 def close_position():
     """
     Close a position.
@@ -307,6 +354,9 @@ def close_position():
     }
     """
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 403
+
         client = _get_client()
         if not client.connected:
             return jsonify({"success": False, "error": "Not connected to MT5"}), 400
@@ -348,9 +398,13 @@ def close_position():
 
 
 @mt5_bp.route("/order/<int:ticket>", methods=["DELETE"])
+@login_required
 def cancel_order(ticket: int):
     """Cancel a pending order."""
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 403
+
         client = _get_client()
         if not client.connected:
             return jsonify({"success": False, "error": "Not connected to MT5"}), 400
@@ -368,6 +422,7 @@ def cancel_order(ticket: int):
 # ==================== Market Data ====================
 
 @mt5_bp.route("/quote", methods=["GET"])
+@login_required
 def get_quote():
     """
     Get real-time quote.
@@ -376,6 +431,9 @@ def get_quote():
     - symbol: Trading symbol (e.g., EURUSD)
     """
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}), 403
+
         client = _get_client()
         if not client.connected:
             return jsonify({"success": False, "error": "Not connected to MT5"}), 400

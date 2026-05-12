@@ -6,17 +6,22 @@ from typing import Any, Optional
 from flask import jsonify, request
 
 
-def envelope(data: Any, *, message: str = "ok", code: int = 0) -> tuple:
+def envelope(data: Any, *, message: str = "ok", code: int = 0, status: int = 200) -> tuple:
     """Standard agent-facing response envelope.
 
     Distinct from the legacy human envelope (`code: 1, msg, data`) so client
     code targeting `/api/agent/v1` can rely on a single, stable shape.
+
+    The HTTP status defaults to 200; pass ``status=202`` for async-queue
+    responses.  Always returns a (Response, status) tuple so callers must
+    NOT wrap the result in another tuple — that produces nested tuples
+    Flask cannot decode.
     """
     return jsonify({
         "code": code,
         "message": message,
         "data": data,
-    }), 200
+    }), status
 
 
 def error(code: int, message: str, *, details: Any = None, retriable: bool = False, http: int = 400):

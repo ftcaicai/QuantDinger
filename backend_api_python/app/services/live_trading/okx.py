@@ -25,6 +25,24 @@ from app.services.live_trading.symbols import to_okx_swap_inst_id, to_okx_spot_i
 class OkxClient(BaseRestClient):
     _DEFAULT_BROKER_CODE = "56fa80b0ce8cBCDE"
 
+    @staticmethod
+    def _ensure_header_safe_ascii(value: str, *, field: str) -> str:
+        """
+        requests/http.client encodes header values using latin-1.
+        OKX credentials should be ASCII; if a user pastes non-ASCII (Chinese, full-width chars, smart quotes),
+        requests will crash before any network call is made.
+        """
+        s = (value or "").strip()
+        try:
+            s.encode("latin-1")
+        except Exception:
+            raise LiveTradingError(
+                f"OKX {field} contains non-ASCII characters and cannot be sent in HTTP headers. "
+                "Please re-copy the value from OKX (ASCII only; avoid Chinese characters, smart quotes, "
+                "full-width symbols, newlines, and trailing spaces)."
+            )
+        return s
+
     def __init__(
         self,
         *,
@@ -37,9 +55,10 @@ class OkxClient(BaseRestClient):
         simulated_trading: bool = False,
     ):
         super().__init__(base_url=base_url, timeout_sec=timeout_sec)
-        self.api_key = (api_key or "").strip()
+        self.api_key = self._ensure_header_safe_ascii(api_key, field="api_key")
+        # secret_key is used for signing (utf-8 bytes), but we still strip to avoid invisible whitespace.
         self.secret_key = (secret_key or "").strip()
-        self.passphrase = (passphrase or "").strip()
+        self.passphrase = self._ensure_header_safe_ascii(passphrase, field="passphrase")
         self.simulated_trading = bool(simulated_trading)
         effective_broker = broker_code or self._DEFAULT_BROKER_CODE
         self.broker_code = str(effective_broker).strip() if effective_broker else None

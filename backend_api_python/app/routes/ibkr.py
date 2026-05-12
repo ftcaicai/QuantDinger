@@ -5,6 +5,7 @@ Standalone API endpoints for US stock trading.
 """
 
 from flask import Blueprint, request, jsonify
+from app.utils.auth import login_required
 
 from app.utils.logger import get_logger
 from app.services.ibkr_trading import IBKRClient, IBKRConfig
@@ -29,6 +30,7 @@ def _get_client() -> IBKRClient:
 # ==================== Connection Management ====================
 
 @ibkr_bp.route('/status', methods=['GET'])
+@login_required
 def get_status():
     """
     Get connection status.
@@ -50,6 +52,7 @@ def get_status():
 
 
 @ibkr_bp.route('/connect', methods=['POST'])
+@login_required
 def connect():
     """
     Connect to TWS / IB Gateway.
@@ -111,6 +114,7 @@ def connect():
 
 
 @ibkr_bp.route('/disconnect', methods=['POST'])
+@login_required
 def disconnect():
     """
     Disconnect from IBKR.
@@ -141,6 +145,7 @@ def disconnect():
 # ==================== Account Queries ====================
 
 @ibkr_bp.route('/account', methods=['GET'])
+@login_required
 def get_account():
     """
     Get account information.
@@ -168,6 +173,7 @@ def get_account():
 
 
 @ibkr_bp.route('/positions', methods=['GET'])
+@login_required
 def get_positions():
     """
     Get positions.
@@ -196,6 +202,7 @@ def get_positions():
 
 
 @ibkr_bp.route('/orders', methods=['GET'])
+@login_required
 def get_orders():
     """
     Get open orders.
@@ -226,6 +233,7 @@ def get_orders():
 # ==================== Trading ====================
 
 @ibkr_bp.route('/order', methods=['POST'])
+@login_required
 def place_order():
     """
     Place an order.
@@ -313,6 +321,7 @@ def place_order():
 
 
 @ibkr_bp.route('/order/<int:order_id>', methods=['DELETE'])
+@login_required
 def cancel_order(order_id: int):
     """
     Cancel an order.
@@ -351,6 +360,7 @@ def cancel_order(order_id: int):
 # ==================== Market Data ====================
 
 @ibkr_bp.route('/quote', methods=['GET'])
+@login_required
 def get_quote():
     """
     Get real-time quote.

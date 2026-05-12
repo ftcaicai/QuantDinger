@@ -97,7 +97,7 @@ def create_backtest():
                 "job_id": existing["job_id"],
                 "status": existing["status"],
                 "duplicate": True,
-            }, message="idempotent replay"), 200
+            }, message="idempotent replay")
 
     payload = dict(body)
     payload["__user_id"] = current_user_id()
@@ -108,4 +108,4 @@ def create_backtest():
         request_payload=payload,
         runner=_run_backtest,
     )
-    return envelope(job, message="queued"), 202
+    return envelope(job, message="queued", status=202)

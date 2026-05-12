@@ -125,6 +125,16 @@ class BaseRestClient:
                 timeout=self.timeout_sec,
                 verify=_get_requests_verify(),
             )
+        except UnicodeEncodeError as e:
+            # requests/http.client requires header values to be latin-1 encodable.
+            # This usually means user pasted API keys/passphrases containing non-ASCII characters,
+            # or included invisible whitespace/newlines.
+            raise LiveTradingError(
+                "Auth failed: request headers contain non-ASCII characters and cannot be encoded. "
+                "Please re-enter API key/secret/passphrase (ASCII only; no Chinese characters, smart quotes, "
+                "full-width symbols, newlines, or trailing spaces). "
+                f"Original error: {e}"
+            )
         except requests.exceptions.SSLError as e:
             logger.warning(
                 "Exchange HTTPS TLS verify failed (%s). Same setting applies to all REST exchanges (Gate, HTX/hbdm, etc.). "

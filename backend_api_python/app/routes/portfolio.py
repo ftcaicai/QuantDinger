@@ -681,7 +681,9 @@ def update_monitor(monitor_id):
         
         # Add next_run_at update if interval was changed
         if next_run_interval is not None:
-            updates.append(f"next_run_at = NOW() + INTERVAL '{next_run_interval} minutes'")
+            # Bind minutes to avoid SQL string interpolation; Postgres: (N || ' minutes')::interval
+            updates.append("next_run_at = NOW() + (? || ' minutes')::interval")
+            params.append(int(next_run_interval))
         
         updates.append('updated_at = NOW()')
         params.append(monitor_id)

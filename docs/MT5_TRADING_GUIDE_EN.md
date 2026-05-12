@@ -22,6 +22,78 @@ pip install MetaTrader5
 
 > **Note**: The MetaTrader5 Python library only works on Windows. For Linux/Mac deployments, consider using a Windows VM or a remote Windows server.
 
+## Deployment & Connection (Windows / Docker Options)
+
+### Key takeaway (one sentence)
+
+**The official MT5 Python library `MetaTrader5` depends on the MT5 Terminal running on Windows.**  
+So the **backend process must run in a Windows environment that can access the MT5 Terminal** for this to work.
+
+### Deployment options (pick the right path first)
+
+| Deployment | MT5 usable? | Recommendation | Notes |
+|---|---:|---:|---|
+| **Run backend natively on Windows (no backend container)** | ✅ | ⭐⭐⭐⭐⭐ | Most stable: backend and MT5 Terminal on the same machine. |
+| **Run backend natively on Windows + Docker only for Postgres/Redis** | ✅ | ⭐⭐⭐⭐⭐ | Common in practice: infra containerized, trading connection stays on Windows host. |
+| **Windows Docker Desktop (Linux containers) runs backend** | ❌ (not recommended) | ⭐ | Containers generally cannot use the host Windows MT5 Terminal directly. |
+| **Linux server/cloud runs backend** | ❌ (not recommended) | ⭐ | `MetaTrader5` is typically Windows-only; use a Windows machine/gateway approach instead. |
+
+### Recommended setup: Windows native backend + MT5 Terminal (optional Docker for DB/Redis)
+
+**Prerequisites:**
+
+- A **Windows** machine (local PC or Windows Server)
+- MT5 Terminal installed and able to login (keep it open and logged in before trading)
+- Python 3.10+ (PowerShell `py` launcher recommended)
+
+**Install Windows-only dependencies:**
+
+This repo provides `backend_api_python/requirements-windows.txt` (includes `MetaTrader5>=5.0.45`).
+
+PowerShell:
+
+```powershell
+cd C:\path\to\QuantDinger\backend_api_python
+
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+py -m pip install -U pip
+pip install -r requirements.txt
+pip install -r requirements-windows.txt
+```
+
+**Configure backend `.env`:**
+
+- `SECRET_KEY=...` (required)
+- `ALLOW_LOCAL_DESKTOP_BROKERS=true` (defaults to true; if false, the server will reject IBKR/MT5 related calls)
+
+Start the backend (entrypoint: `backend_api_python/run.py`):
+
+```powershell
+cd C:\path\to\QuantDinger\backend_api_python
+.\.venv\Scripts\Activate.ps1
+python run.py
+```
+
+Suggested quick checks after startup:
+
+- Health check: `http://localhost:5000/api/health`
+- MT5 status: `http://localhost:5000/api/mt5/status`
+
+### Why MT5 often fails in Docker deployments
+
+With Docker Desktop one-click deployments, the backend usually runs inside a **Linux container**:
+
+- The official `MetaTrader5` library depends on the Windows MT5 Terminal (a local GUI app)
+- Linux containers cannot directly call into the host MT5 Terminal
+- Even if you install the package in the container, establishing a working connection is unlikely
+
+**Suggestions:**
+
+- If you do **not** need MT5: set `ALLOW_LOCAL_DESKTOP_BROKERS=false` in `backend_api_python/.env` so the UI can show a clear message instead of errors
+- If you **must** use MT5: run the backend natively on Windows (recommended above), or implement a “Windows MT5 gateway/bridge” (container calls the gateway)
+
 ## MT5 Terminal Configuration
 
 1. Download and install MetaTrader 5 from your broker or [official website](https://www.metatrader5.com/)
@@ -187,18 +259,6 @@ curl -X POST http://localhost:5000/api/mt5/close \
 | Symbol not found | Invalid symbol | Check broker's symbol list |
 | Trade not allowed | Trading disabled | Enable algo trading in MT5 options |
 | Order rejected | Insufficient margin | Check account balance and margin |
-
-## Docker Deployment
-
-When running QuantDinger in Docker, MT5 trading requires:
-
-1. **Windows host**: Docker Desktop on Windows, or Windows Server
-2. **MT5 on host**: Run MT5 terminal on the Windows host
-3. **Network access**: Container must be able to access the host's MT5 terminal
-
-For Linux/Mac deployments, consider:
-- Running QuantDinger backend on a Windows VM
-- Using a remote Windows server for MT5 connection
 
 ## Security Recommendations
 

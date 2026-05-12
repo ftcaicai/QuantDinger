@@ -725,6 +725,25 @@ def register():
             role='user',
             token_version=new_token_version
         )
+
+        # Update last login time (auto-login after registration)
+        try:
+            from app.utils.db import get_db_connection
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    "UPDATE qd_users SET last_login_at = NOW() WHERE id = ?",
+                    (user_id,)
+                )
+                db.commit()
+                affected = cur.rowcount
+                cur.close()
+                if affected == 0:
+                    logger.error(f"Failed to update last_login_at: no rows affected for user_id={user_id}")
+                else:
+                    logger.info(f"Updated last_login_at for user_id={user_id}")
+        except Exception as e:
+            logger.error(f"Failed to update last_login_at for user_id={user_id}: {e}")
         
         return jsonify({
             'code': 1,

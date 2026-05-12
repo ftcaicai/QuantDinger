@@ -249,7 +249,8 @@ class AnalysisMemory:
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
-                cur.execute(f"""
+                days_int = int(days)
+                cur.execute("""
                     SELECT 
                         id, decision, confidence, price_at_analysis,
                         summary, reasons, scores,
@@ -257,10 +258,10 @@ class AnalysisMemory:
                         task_status, task_error, updated_at
                     FROM qd_analysis_memory
                     WHERE market = %s AND symbol = %s
-                    AND created_at > NOW() - INTERVAL '{int(days)} days'
+                    AND created_at > NOW() - (%s || ' days')::interval
                     ORDER BY created_at DESC
                     LIMIT %s
-                """, (market, symbol, limit))
+                """, (market, symbol, days_int, limit))
                 
                 rows = cur.fetchall() or []
                 cur.close()
@@ -631,14 +632,15 @@ class AnalysisMemory:
                 cur = db.cursor()
                 
                 # Get unvalidated decisions from N days ago
-                cur.execute(f"""
+                days_ago_int = int(days_ago)
+                cur.execute("""
                     SELECT id, market, symbol, decision, price_at_analysis
                     FROM qd_analysis_memory
                     WHERE validated_at IS NULL
-                    AND created_at < NOW() - INTERVAL '{int(days_ago)} days'
-                    AND created_at > NOW() - INTERVAL '{int(days_ago + 1)} days'
+                    AND created_at < NOW() - (%s || ' days')::interval
+                    AND created_at > NOW() - (%s || ' days')::interval
                     LIMIT 50
-                """)
+                """, (days_ago_int, int(days_ago_int + 1)))
                 
                 rows = cur.fetchall() or []
                 
@@ -718,14 +720,17 @@ class AnalysisMemory:
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
+                min_age_days_int = int(min_age_days)
+                limit_int = int(limit)
                 cur.execute(
-                    f"""
+                    """
                     SELECT id, market, symbol, decision, price_at_analysis
                     FROM qd_analysis_memory
                     WHERE validated_at IS NULL
-                      AND created_at < NOW() - INTERVAL '{int(min_age_days)} days'
-                    LIMIT {int(limit)}
-                    """
+                      AND created_at < NOW() - (%s || ' days')::interval
+                    LIMIT %s
+                    """,
+                    (min_age_days_int, limit_int),
                 )
                 rows = cur.fetchall() or []
 
@@ -790,13 +795,15 @@ class AnalysisMemory:
                 cur = db.cursor()
                 where = ["validated_at IS NOT NULL", "was_correct IS NOT NULL", "confidence IS NOT NULL"]
                 params = []
+                days_int = int(days)
                 if market:
                     where.append("market = %s")
                     params.append(market)
                 if symbol:
                     where.append("symbol = %s")
                     params.append(symbol)
-                where.append(f"created_at > NOW() - INTERVAL '{int(days)} days'")
+                where.append("created_at > NOW() - (%s || ' days')::interval")
+                params.append(days_int)
                 params = tuple(params) if params else ()
                 cur.execute(f"""
                     SELECT confidence, was_correct
@@ -867,8 +874,9 @@ class AnalysisMemory:
                     where_clauses.append("symbol = %s")
                     params.append(symbol)
                 
-                # Use f-string for interval since psycopg2 doesn't support placeholder in INTERVAL
-                where_clauses.append(f"created_at > NOW() - INTERVAL '{int(days)} days'")
+                days_int = int(days)
+                where_clauses.append("created_at > NOW() - (%s || ' days')::interval")
+                params.append(days_int)
                 
                 where_sql = " AND ".join(where_clauses)
                 

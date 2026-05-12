@@ -22,6 +22,78 @@ pip install MetaTrader5
 
 > **注意**：MetaTrader5 Python 库仅支持 Windows 平台。Linux/Mac 部署请考虑使用 Windows VM 或远程 Windows 服务器。
 
+## 部署与连接（Windows / Docker 选择）
+
+### 关键结论（一句话）
+
+**MT5 官方 Python 库 `MetaTrader5` 依赖 Windows 上的 MT5 Terminal。**  
+因此，**“后端进程必须运行在可访问 MT5 Terminal 的 Windows 环境中”** 才能工作。
+
+### 部署形态对照表（先选对路）
+
+| 部署方式 | 能否使用 MT5 | 推荐程度 | 说明 |
+|---|---:|---:|---|
+| **Windows 原生运行后端（不跑后端容器）** | ✅ | ⭐⭐⭐⭐⭐ | 最稳定：后端与 MT5 Terminal 同机。 |
+| **Windows 原生后端 + Docker 只跑 Postgres/Redis** | ✅ | ⭐⭐⭐⭐⭐ | 实战最常见：基础设施容器化，交易连接仍在 Windows 本机。 |
+| **Windows Docker Desktop（Linux 容器）跑后端** | ❌（不推荐） | ⭐ | 容器里无法直接使用 Windows MT5 Terminal；即使装包也大概率不可用。 |
+| **Linux 服务器/云主机跑后端** | ❌（不推荐） | ⭐ | `MetaTrader5` 库通常仅 Windows 可用；需要改用 Windows 机器/网关方案。 |
+
+### 推荐方案：Windows 原生运行后端 + MT5 Terminal（可选 Docker 跑 DB/Redis）
+
+**前置条件：**
+
+- 一台 **Windows** 机器（本地电脑或 Windows Server 均可）
+- 已安装并能登录 **MT5 Terminal**（建议交易前保持打开并登录）
+- Python 3.10+（建议通过 `py` 启动器）
+
+**安装 Windows 专用依赖：**
+
+仓库里提供：`backend_api_python/requirements-windows.txt`（包含 `MetaTrader5>=5.0.45`）。
+
+PowerShell：
+
+```powershell
+cd C:\path\to\QuantDinger\backend_api_python
+
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+py -m pip install -U pip
+pip install -r requirements.txt
+pip install -r requirements-windows.txt
+```
+
+**配置后端 `.env`：**
+
+- `SECRET_KEY=...`（必须设置）
+- `ALLOW_LOCAL_DESKTOP_BROKERS=true`（默认 true；若为 false，服务器会拒绝 IBKR/MT5 相关调用）
+
+启动后端（入口：`backend_api_python/run.py`）：
+
+```powershell
+cd C:\path\to\QuantDinger\backend_api_python
+.\.venv\Scripts\Activate.ps1
+python run.py
+```
+
+启动后建议自检：
+
+- API 健康检查：`http://localhost:5000/api/health`
+- MT5 状态：`http://localhost:5000/api/mt5/status`
+
+### Docker 部署为什么经常连不上 MT5？
+
+当你用 Docker Desktop 一键部署时，后端通常运行在 **Linux 容器**里：
+
+- `MetaTrader5` 官方库依赖 Windows MT5 Terminal（本机 GUI 程序）
+- Linux 容器无法直接调用宿主机的 MT5 Terminal
+- 即使强行在容器里装包，也很难建立有效连接
+
+**建议：**
+
+- 如果不需要 MT5：在 `backend_api_python/.env` 设置 `ALLOW_LOCAL_DESKTOP_BROKERS=false`，让 UI 显示明确提示而不是报错
+- 如果必须用 MT5：改用 Windows 原生运行后端（上文方案），或实现“Windows MT5 网关/Bridge”（容器调用网关）
+
 ## MT5 终端配置
 
 1. 从您的券商或[官网](https://www.metatrader5.com/)下载并安装 MetaTrader 5
@@ -187,18 +259,6 @@ curl -X POST http://localhost:5000/api/mt5/close \
 | 代码未找到 | 无效代码 | 查看券商的代码列表 |
 | 交易被禁用 | 交易未启用 | 在 MT5 选项中启用自动交易 |
 | 订单被拒绝 | 保证金不足 | 检查账户余额和保证金 |
-
-## Docker 部署
-
-在 Docker 中运行 QuantDinger 时，MT5 交易需要：
-
-1. **Windows 主机**：Windows 上的 Docker Desktop 或 Windows Server
-2. **主机上的 MT5**：在 Windows 主机上运行 MT5 终端
-3. **网络访问**：容器必须能访问主机的 MT5 终端
-
-对于 Linux/Mac 部署，请考虑：
-- 在 Windows VM 上运行 QuantDinger 后端
-- 使用远程 Windows 服务器进行 MT5 连接
 
 ## 安全建议
 

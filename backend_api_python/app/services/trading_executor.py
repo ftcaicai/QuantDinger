@@ -870,6 +870,14 @@ class TradingExecutor:
 
             # 初始化策略状态
             trading_config = strategy['trading_config']
+            # `strict_mode` opts the strategy into "backtest-equivalent" semantics:
+            # closed-bar signals only (drop in-progress bar) and a confirmed exit
+            # signal (no aggressive intra-bar close). This reduces the drift
+            # between backtest and live but typically delays entries/exits by
+            # one full bar. Both knobs default to existing behaviour when
+            # strict_mode is unset.
+            if trading_config and bool(trading_config.get('strict_mode', False)):
+                trading_config.setdefault('exit_signal_mode', 'confirmed')
             indicator_config = strategy.get('indicator_config') or {}
             ai_model_config = strategy.get('ai_model_config') or {}
             execution_mode = (strategy.get('execution_mode') or 'signal').strip().lower()
@@ -1275,7 +1283,32 @@ class TradingExecutor:
                         elif (not is_script) and 'df' in locals() and df is not None and len(df) > 0:
                             try:
                                 realtime_df = df.copy()
-                                realtime_df = self._update_dataframe_with_current_price(realtime_df, current_price, timeframe)
+                                # `strict_mode` (default False) keeps the dataframe
+                                # exactly as upstream returned it. The default
+                                # behaviour paints the in-progress bar's
+                                # open/high/low/close with the current price so
+                                # indicators react sooner — this is the largest
+                                # source of "backtest vs. live drift" because the
+                                # backtester operates on closed bars only. When
+                                # users opt into strict mode we additionally
+                                # drop the in-progress bar so the indicator sees
+                                # the same bar sequence the backtester saw.
+                                strict_mode = bool(trading_config.get('strict_mode', False))
+                                if strict_mode:
+                                    try:
+                                        from app.data_sources.base import TIMEFRAME_SECONDS as _TFS
+                                        _tf_key = timeframe if timeframe in _TFS else str(timeframe).upper()
+                                        _tf_seconds = _TFS.get(_tf_key, 60)
+                                        if len(realtime_df) > 1:
+                                            _last_ts = float(realtime_df.index[-1].timestamp())
+                                            _now_ts = float(time.time())
+                                            _current_period_start = int(_now_ts // _tf_seconds) * _tf_seconds
+                                            if abs(_last_ts - _current_period_start) < 2:
+                                                realtime_df = realtime_df.iloc[:-1].copy()
+                                    except Exception as _strict_drop_e:
+                                        logger.debug(f"strict_mode last-bar drop skipped: {_strict_drop_e}")
+                                else:
+                                    realtime_df = self._update_dataframe_with_current_price(realtime_df, current_price, timeframe)
 
                                 current_pos_list = self._get_current_positions(strategy_id, symbol)
                                 initial_highest = 0.0

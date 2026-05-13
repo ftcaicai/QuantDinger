@@ -124,6 +124,12 @@ class IndicatorParamsParser:
         r'#\s*@param\s+(\w+)\s+(int|float|bool|str|string)\s+(\S+)\s*(.*)',
         re.IGNORECASE
     )
+
+    # Optional sweep declarations inside the description:
+    #   range=3:30:2     -> inclusive arithmetic series from 3 to 30 step 2
+    #   values=3,5,10    -> explicit discrete list
+    _RANGE_RE = re.compile(r'range\s*=\s*(-?\d+(?:\.\d+)?)\s*:\s*(-?\d+(?:\.\d+)?)\s*:\s*(-?\d+(?:\.\d+)?)', re.IGNORECASE)
+    _VALUES_RE = re.compile(r'values\s*=\s*([^\s]+)', re.IGNORECASE)
     
     @classmethod
     def parse_params(cls, indicator_code: str) -> List[Dict[str, Any]]:
@@ -137,10 +143,16 @@ class IndicatorParamsParser:
                     "name": "ma_fast",
                     "type": "int",
                     "default": 5,
-                    "description": "短期均线周期"
+                    "description": "短期均线周期",
+                    "values": [3, 5, 7, ...]   # optional: from `range=...` or `values=...`
                 },
                 ...
             ]
+
+        Optional sweep grammar (numeric params only):
+          # @param ma_fast int 5 短期均线周期 range=3:30:2
+          # @param threshold float 0.5 阈值 values=0.3,0.5,0.7,0.9
+        Sweep markers are stripped from the human description before being returned.
         """
         params = []
         if not indicator_code:
@@ -161,15 +173,86 @@ class IndicatorParamsParser:
                 # 规范化类型名
                 if param_type == 'string':
                     param_type = 'str'
-                
-                params.append({
+
+                values: Optional[List[Any]] = None
+                if param_type in ('int', 'float'):
+                    values = cls._extract_sweep_values(description, param_type)
+                description = cls._strip_sweep_markers(description)
+
+                entry: Dict[str, Any] = {
                     "name": name,
                     "type": param_type,
                     "default": default,
-                    "description": description
-                })
+                    "description": description,
+                }
+                if values:
+                    entry["values"] = values
+                params.append(entry)
         
         return params
+
+    @classmethod
+    def _extract_sweep_values(cls, description: str, param_type: str) -> Optional[List[Any]]:
+        if not description:
+            return None
+        # Prefer explicit `values=...` over inferred `range=...` when both are present.
+        m_values = cls._VALUES_RE.search(description)
+        if m_values:
+            raw = m_values.group(1)
+            out: List[Any] = []
+            for token in raw.split(','):
+                token = token.strip()
+                if not token:
+                    continue
+                converted = cls._convert_value(token, param_type)
+                if converted is not None:
+                    out.append(converted)
+            # Deduplicate but preserve declared order
+            seen = set()
+            unique: List[Any] = []
+            for v in out:
+                if v in seen:
+                    continue
+                seen.add(v)
+                unique.append(v)
+            return unique or None
+        m_range = cls._RANGE_RE.search(description)
+        if m_range:
+            try:
+                lo = float(m_range.group(1))
+                hi = float(m_range.group(2))
+                step = float(m_range.group(3))
+            except (TypeError, ValueError):
+                return None
+            if step == 0 or (hi - lo) * step < 0:
+                return None
+            out: List[Any] = []
+            cursor = lo
+            # Guard against runaway loops on malicious or absurd inputs.
+            max_count = 1024
+            while (step > 0 and cursor <= hi + 1e-9) or (step < 0 and cursor >= hi - 1e-9):
+                if param_type == 'int':
+                    out.append(int(round(cursor)))
+                else:
+                    out.append(round(cursor, 8))
+                cursor += step
+                if len(out) >= max_count:
+                    break
+            seen = set()
+            unique: List[Any] = []
+            for v in out:
+                if v in seen:
+                    continue
+                seen.add(v)
+                unique.append(v)
+            return unique or None
+        return None
+
+    @classmethod
+    def _strip_sweep_markers(cls, description: str) -> str:
+        cleaned = cls._RANGE_RE.sub('', description or '')
+        cleaned = cls._VALUES_RE.sub('', cleaned)
+        return cleaned.strip()
     
     @classmethod
     def _convert_value(cls, value_str: str, param_type: str) -> Any:

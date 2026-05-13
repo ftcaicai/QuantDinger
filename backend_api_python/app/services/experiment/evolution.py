@@ -43,9 +43,31 @@ class StrategyEvolutionService:
         *,
         max_variants: int,
     ) -> List[Dict[str, Any]]:
+        """Materialize a Cartesian product, shuffle, then truncate.
+
+        Naive enumeration of ``itertools.product`` produces combinations in
+        lexicographic order over the keys, which is a fairness bug once
+        ``len(product) > max_variants``: the first dimension always varies
+        slowest and the last varies fastest, so the budget is biased toward
+        a single corner of the search space. We materialise the full grid
+        (capped at a hard ceiling so we never blow memory on absurd inputs),
+        shuffle deterministically with a fixed seed for reproducibility, then
+        take the first ``max_variants``.
+        """
         keys = list(normalized_space.keys())
+        hard_cap = max(max_variants * 8, max_variants + 64, 1024)
+        all_combos: List[tuple] = []
+        for values in itertools.product(*(normalized_space[key] for key in keys)):
+            all_combos.append(values)
+            if len(all_combos) >= hard_cap:
+                break
+
+        rng = random.Random(0xC0DE)
+        rng.shuffle(all_combos)
+        selected = all_combos[:max_variants]
+
         variants: List[Dict[str, Any]] = []
-        for idx, values in enumerate(itertools.product(*(normalized_space[key] for key in keys)), start=1):
+        for idx, values in enumerate(selected, start=1):
             snapshot = copy.deepcopy(base_snapshot)
             overrides = {}
             for key, value in zip(keys, values):
@@ -57,8 +79,6 @@ class StrategyEvolutionService:
                 'overrides': overrides,
                 'source': 'evolution_grid',
             })
-            if len(variants) >= max_variants:
-                break
         return variants
 
     def _random_variants(

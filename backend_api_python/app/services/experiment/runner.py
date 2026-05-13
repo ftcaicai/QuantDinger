@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from app.services.backtest import BacktestService
 from app.services.experiment.evolution import StrategyEvolutionService
+from app.services.experiment.optimizers import make_optimizer
 from app.services.experiment.prompts import (
     SYSTEM_PROMPT,
     build_round_prompt,
@@ -49,6 +50,18 @@ class ExperimentRunnerService:
     # NEW: LLM-driven multi-round AI pipeline
     # ------------------------------------------------------------------
 
+    def _scorer_for_payload(self, payload: Dict[str, Any]) -> StrategyScoringService:
+        """Return a scorer honouring per-request ``scoring.customWeights``.
+
+        Falls back to the shared service when no overrides are supplied so we
+        keep regime-aware switching as the default behaviour.
+        """
+        scoring_cfg = (payload or {}).get('scoring') or {}
+        custom = scoring_cfg.get('customWeights')
+        if isinstance(custom, dict) and custom:
+            return StrategyScoringService(custom_weights=custom)
+        return self.scoring_service
+
     def run_ai_pipeline(
         self,
         *,
@@ -79,10 +92,26 @@ class ExperimentRunnerService:
         max_rounds = int(payload.get('maxRounds') or DEFAULT_MAX_ROUNDS)
         n_per_round = int(payload.get('candidatesPerRound') or DEFAULT_CANDIDATES_PER_ROUND)
         early_stop = float(payload.get('earlyStopScore') or EARLY_STOP_SCORE)
+        scorer = self._scorer_for_payload(payload)
 
         snapshot, start_date, end_date = self._build_snapshot(base=base, user_id=user_id)
         indicator_code = snapshot.get('code') or ''
         indicator_params = extract_indicator_params(indicator_code)
+
+        # OOS 70/30 split — same semantics as `run_structured_tune`. We train
+        # on the first 70% to keep LLM round backtests deterministic, then
+        # validate the final ranked list on the held-out 30%. Disabled
+        # automatically when the window is too short to split cleanly.
+        oos_enabled_input = payload.get('oosValidation', True)
+        oos_window = self._compute_oos_window(start_date, end_date) if oos_enabled_input else None
+        if oos_window is not None:
+            train_start = oos_window['train_start']
+            train_end = oos_window['train_end']
+            oos_start = oos_window['oos_start']
+            oos_end = oos_window['oos_end']
+        else:
+            train_start, train_end = start_date, end_date
+            oos_start = oos_end = None
 
         # --- Step 1: detect market regime ---
         self._emit(on_progress, 'regime', {'status': 'running'})
@@ -160,14 +189,14 @@ class ExperimentRunnerService:
                 try:
                     result = self.backtest_service.run_strategy_snapshot(
                         cand_snapshot,
-                        start_date=start_date,
-                        end_date=end_date,
+                        start_date=train_start,
+                        end_date=train_end,
                     )
                 except Exception as exc:
                     logger.error("Backtest failed for %s: %s", cand.get('name'), exc)
                     result = {}
 
-                score = self.scoring_service.score_result(result, regime=regime)
+                score = scorer.score_result(result, regime=regime)
                 round_ranked.append({
                     'name': cand.get('name', f'R{round_num}_{idx}'),
                     'reasoning': cand.get('reasoning', ''),
@@ -181,7 +210,7 @@ class ExperimentRunnerService:
                     'result': self._slim_result(result),
                 })
 
-            round_ranked = self.scoring_service.rank_results(round_ranked)
+            round_ranked = scorer.rank_results(round_ranked)
             round_best = round_ranked[0] if round_ranked else None
             round_best_score = float((round_best or {}).get('score', {}).get('overallScore', 0))
 
@@ -211,7 +240,21 @@ class ExperimentRunnerService:
         all_candidates = []
         for rd in all_rounds:
             all_candidates.extend(rd.get('candidates') or [])
-        all_candidates = self.scoring_service.rank_results(all_candidates)
+        all_candidates = scorer.rank_results(all_candidates)
+
+        oos_meta = None
+        if oos_start is not None and oos_end is not None:
+            self._evaluate_oos(
+                all_candidates, oos_start=oos_start, oos_end=oos_end, regime=regime, scorer=scorer,
+            )
+            oos_meta = {
+                'enabled': True,
+                'trainStart': train_start.strftime('%Y-%m-%d'),
+                'trainEnd': train_end.strftime('%Y-%m-%d'),
+                'oosStart': oos_start.strftime('%Y-%m-%d'),
+                'oosEnd': oos_end.strftime('%Y-%m-%d'),
+                'trainRatio': 0.7,
+            }
 
         output = {
             'regime': regime,
@@ -227,6 +270,8 @@ class ExperimentRunnerService:
             } for r in all_rounds],
             'rankedStrategies': all_candidates[:20],
             'bestStrategyOutput': self._build_best_output(global_best),
+            'oosValidation': oos_meta,
+            'scoringWeights': scorer.resolve_weights(regime),
             'experiment': {
                 'totalRounds': len(all_rounds),
                 'totalCandidates': len(all_candidates),
@@ -411,56 +456,97 @@ class ExperimentRunnerService:
         evolution = payload.get('evolution') or {}
         max_variants = int(evolution.get('maxVariants') or 48)
         method = str(evolution.get('method') or 'grid').lower()
-        if method not in ('grid', 'random'):
+        if method not in ('grid', 'random', 'de', 'tpe'):
             method = 'grid'
         include_baseline = payload.get('includeBaseline', True)
+        scorer = self._scorer_for_payload(payload)
 
         t0 = time.time()
         snapshot, start_date, end_date = self._build_snapshot(base=base, user_id=user_id)
         regime = self.detect_regime(base)
 
-        candidates = self._build_candidates(
-            base_snapshot=snapshot,
-            variants=payload.get('variants') or [],
-            parameter_space=parameter_space,
-            evolution={
-                'method': method,
-                'maxVariants': max_variants,
-                'parameterSpace': parameter_space,
-            },
-        )
-        if not include_baseline:
-            candidates = [c for c in candidates if c.get('source') != 'baseline']
+        # OOS validation 70/30: train on the first 70% of the window, then
+        # re-backtest the top-K on the last 30%. Off when the window is too
+        # short to split meaningfully OR when the caller explicitly disables.
+        oos_enabled_input = payload.get('oosValidation', True)
+        oos_window = self._compute_oos_window(start_date, end_date) if oos_enabled_input else None
+        if oos_window is not None:
+            train_start = oos_window['train_start']
+            train_end = oos_window['train_end']
+            oos_start = oos_window['oos_start']
+            oos_end = oos_window['oos_end']
+        else:
+            train_start, train_end = start_date, end_date
+            oos_start = oos_end = None
 
-        ranked: List[Dict[str, Any]] = []
-        for candidate in candidates:
-            try:
-                result = self.backtest_service.run_strategy_snapshot(
-                    candidate['snapshot'],
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-            except Exception as exc:
-                logger.error("structured_tune backtest failed for %s: %s", candidate.get('name'), exc)
-                result = {}
-            score = self.scoring_service.score_result(result, regime=regime)
-            ranked.append({
-                'name': candidate['name'],
-                'reasoning': '',
-                'source': candidate['source'],
-                'overrides': candidate.get('overrides') or {},
-                'snapshot': candidate['snapshot'],
-                'score': score,
-                'result': self._slim_result(result),
-            })
+        if method in ('de', 'tpe'):
+            ranked = self._run_iterative_optimizer(
+                method=method,
+                base_snapshot=snapshot,
+                parameter_space=parameter_space,
+                regime=regime,
+                train_start=train_start,
+                train_end=train_end,
+                max_evals=max_variants,
+                include_baseline=include_baseline,
+                scorer=scorer,
+            )
+        else:
+            candidates = self._build_candidates(
+                base_snapshot=snapshot,
+                variants=payload.get('variants') or [],
+                parameter_space=parameter_space,
+                evolution={
+                    'method': method,
+                    'maxVariants': max_variants,
+                    'parameterSpace': parameter_space,
+                },
+            )
+            if not include_baseline:
+                candidates = [c for c in candidates if c.get('source') != 'baseline']
 
-        ranked = self.scoring_service.rank_results(ranked)
+            ranked = []
+            for candidate in candidates:
+                try:
+                    result = self.backtest_service.run_strategy_snapshot(
+                        candidate['snapshot'],
+                        start_date=train_start,
+                        end_date=train_end,
+                    )
+                except Exception as exc:
+                    logger.error("structured_tune backtest failed for %s: %s", candidate.get('name'), exc)
+                    result = {}
+                score = scorer.score_result(result, regime=regime)
+                ranked.append({
+                    'name': candidate['name'],
+                    'reasoning': '',
+                    'source': candidate['source'],
+                    'overrides': candidate.get('overrides') or {},
+                    'snapshot': candidate['snapshot'],
+                    'score': score,
+                    'result': self._slim_result(result),
+                })
+
+        ranked = scorer.rank_results(ranked)
+        if oos_start is not None and oos_end is not None:
+            self._evaluate_oos(ranked, oos_start=oos_start, oos_end=oos_end, regime=regime, scorer=scorer)
         best = ranked[0] if ranked else None
         elapsed = round(time.time() - t0, 1)
         global_best_score = float((best or {}).get('score', {}).get('overallScore', 0) or 0)
 
         indicator_code = snapshot.get('code') or ''
         indicator_params = extract_indicator_params(indicator_code)
+
+        oos_meta = None
+        if oos_start is not None and oos_end is not None:
+            oos_meta = {
+                'enabled': True,
+                'trainStart': train_start.strftime('%Y-%m-%d'),
+                'trainEnd': train_end.strftime('%Y-%m-%d'),
+                'oosStart': oos_start.strftime('%Y-%m-%d'),
+                'oosEnd': oos_end.strftime('%Y-%m-%d'),
+                'trainRatio': 0.7,
+            }
 
         return {
             'regime': regime,
@@ -476,6 +562,8 @@ class ExperimentRunnerService:
             }],
             'rankedStrategies': ranked[:50],
             'bestStrategyOutput': self._build_best_output(best),
+            'oosValidation': oos_meta,
+            'scoringWeights': scorer.resolve_weights(regime),
             'experiment': {
                 'totalRounds': 1,
                 'totalCandidates': len(ranked),
@@ -493,6 +581,143 @@ class ExperimentRunnerService:
         start_date, end_date = self._parse_dates(base)
         df = self.backtest_service._fetch_kline_data(market, symbol, timeframe, start_date, end_date)
         return self.regime_service.detect(df, symbol=symbol, market=market, timeframe=timeframe)
+
+    def _run_iterative_optimizer(
+        self,
+        *,
+        method: str,
+        base_snapshot: Dict[str, Any],
+        parameter_space: Dict[str, Any],
+        regime: Dict[str, Any],
+        train_start: datetime,
+        train_end: datetime,
+        max_evals: int,
+        include_baseline: bool = True,
+        scorer: Optional[StrategyScoringService] = None,
+    ) -> List[Dict[str, Any]]:
+        """Drive a DE/TPE optimizer through ``ask`` / ``tell`` batches.
+
+        Each ``ask`` returns a batch of override dicts; we materialise them
+        into snapshots, backtest, score, then feed the scores back via
+        ``tell``. The loop exits once the optimizer's eval budget is used up
+        OR it stops proposing new candidates.
+        """
+        active_scorer = scorer or self.scoring_service
+        try:
+            optimizer = make_optimizer(
+                method, parameter_space, max_evals=max(8, int(max_evals)),
+            )
+        except ValueError as exc:
+            logger.warning("Failed to build %s optimizer: %s — falling back to grid", method, exc)
+            optimizer = None
+
+        if optimizer is None:
+            # Defensive fallback: caller should have routed grid/random to the
+            # legacy path, but if we get here just emulate a one-shot grid.
+            candidates = self._build_candidates(
+                base_snapshot=base_snapshot,
+                variants=[],
+                parameter_space=parameter_space,
+                evolution={
+                    'method': 'grid',
+                    'maxVariants': max(8, int(max_evals)),
+                    'parameterSpace': parameter_space,
+                },
+            )
+            ranked: List[Dict[str, Any]] = []
+            for candidate in candidates:
+                try:
+                    result = self.backtest_service.run_strategy_snapshot(
+                        candidate['snapshot'],
+                        start_date=train_start,
+                        end_date=train_end,
+                    )
+                except Exception as exc:
+                    logger.error("fallback backtest failed: %s", exc)
+                    result = {}
+                score = active_scorer.score_result(result, regime=regime)
+                ranked.append({
+                    'name': candidate['name'],
+                    'reasoning': '',
+                    'source': candidate['source'],
+                    'overrides': candidate.get('overrides') or {},
+                    'snapshot': candidate['snapshot'],
+                    'score': score,
+                    'result': self._slim_result(result),
+                })
+            return ranked
+
+        ranked: List[Dict[str, Any]] = []
+
+        # Optionally evaluate the baseline first so the user always sees how
+        # the unmodified strategy compares to optimizer-found candidates.
+        if include_baseline:
+            try:
+                base_result = self.backtest_service.run_strategy_snapshot(
+                    copy.deepcopy(base_snapshot),
+                    start_date=train_start,
+                    end_date=train_end,
+                )
+            except Exception as exc:
+                logger.error("baseline backtest failed: %s", exc)
+                base_result = {}
+            base_score = active_scorer.score_result(base_result, regime=regime)
+            ranked.append({
+                'name': 'baseline',
+                'reasoning': '',
+                'source': 'baseline',
+                'overrides': {},
+                'snapshot': copy.deepcopy(base_snapshot),
+                'score': base_score,
+                'result': self._slim_result(base_result),
+            })
+
+        gen_idx = 0
+        while True:
+            batch = optimizer.ask()
+            if not batch:
+                break
+            gen_idx += 1
+            tell_buffer: List[tuple[Dict[str, Any], float]] = []
+            for cand_idx, overrides in enumerate(batch, start=1):
+                snap = self._apply_overrides_to_snapshot(base_snapshot, overrides)
+                try:
+                    result = self.backtest_service.run_strategy_snapshot(
+                        snap, start_date=train_start, end_date=train_end,
+                    )
+                except Exception as exc:
+                    logger.error("%s backtest failed for gen=%d cand=%d: %s",
+                                 method, gen_idx, cand_idx, exc)
+                    result = {}
+                score = active_scorer.score_result(result, regime=regime)
+                overall = float((score or {}).get('overallScore') or 0.0)
+                tell_buffer.append((overrides, overall))
+                ranked.append({
+                    'name': f'{method}_g{gen_idx}_c{cand_idx}',
+                    'reasoning': '',
+                    'source': f'evolution_{method}',
+                    'overrides': overrides,
+                    'snapshot': snap,
+                    'score': score,
+                    'result': self._slim_result(result),
+                })
+            optimizer.tell(tell_buffer)
+
+        return ranked
+
+    @staticmethod
+    def _apply_overrides_to_snapshot(
+        base_snapshot: Dict[str, Any],
+        overrides: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Materialise an override dict (dot-paths → values) into a snapshot."""
+        from app.services.experiment.evolution import StrategyEvolutionService
+        evo = StrategyEvolutionService()
+        snap = copy.deepcopy(base_snapshot)
+        for key, value in (overrides or {}).items():
+            parts = evo._normalize_key(key).split('.')
+            evo._set_nested(snap, parts, value)
+        return snap
 
     def _build_candidates(
         self,
@@ -578,6 +803,87 @@ class ExperimentRunnerService:
         return start_date, end_date
 
     @staticmethod
+    def _compute_oos_window(
+        start_date: datetime,
+        end_date: datetime,
+        train_ratio: float = 0.7,
+        min_total_days: int = 30,
+        min_oos_days: int = 7,
+    ) -> Optional[Dict[str, datetime]]:
+        """Split the backtest window into in-sample (train) + out-of-sample (test).
+
+        Returns ``None`` when the window is too short to split meaningfully —
+        callers should then fall back to the full window. We require at least
+        ``min_total_days`` of data and ``min_oos_days`` of OOS to avoid trying
+        to validate on a noisy 2-day tail.
+        """
+        from datetime import timedelta as _td
+        if not start_date or not end_date or end_date <= start_date:
+            return None
+        total_seconds = (end_date - start_date).total_seconds()
+        total_days = total_seconds / 86400.0
+        if total_days < min_total_days:
+            return None
+        train_seconds = total_seconds * float(train_ratio)
+        train_end = start_date + _td(seconds=train_seconds)
+        oos_start = train_end
+        oos_days = (end_date - oos_start).total_seconds() / 86400.0
+        if oos_days < min_oos_days:
+            return None
+        return {
+            'train_start': start_date,
+            'train_end': train_end,
+            'oos_start': oos_start,
+            'oos_end': end_date,
+        }
+
+    def _evaluate_oos(
+        self,
+        ranked: List[Dict[str, Any]],
+        *,
+        oos_start: datetime,
+        oos_end: datetime,
+        regime: Dict[str, Any],
+        top_k: int = 5,
+        scorer: Optional[StrategyScoringService] = None,
+    ) -> List[Dict[str, Any]]:
+        """Re-backtest top-K candidates on OOS data and annotate the rank list.
+
+        We attach ``oosScore``/``oosResult`` and a degradation flag so the
+        client can flag overfit candidates. The mutation is in-place; the
+        same list is returned for chaining.
+        """
+        if not ranked or oos_end <= oos_start:
+            return ranked
+        active_scorer = scorer or self.scoring_service
+        for candidate in ranked[:top_k]:
+            try:
+                oos_result = self.backtest_service.run_strategy_snapshot(
+                    candidate.get('snapshot') or {},
+                    start_date=oos_start,
+                    end_date=oos_end,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "OOS backtest failed for %s: %s", candidate.get('name'), exc
+                )
+                oos_result = {}
+            oos_score = active_scorer.score_result(oos_result, regime=regime)
+            is_overall = float(((candidate.get('score') or {}).get('overallScore') or 0))
+            oos_overall = float((oos_score or {}).get('overallScore') or 0)
+            degradation = None
+            if is_overall > 0:
+                degradation = round((is_overall - oos_overall) / is_overall, 4)
+            candidate['oosScore'] = oos_score
+            candidate['oosResult'] = self._slim_result(oos_result)
+            candidate['oosDegradation'] = degradation
+            # Severely overfit if OOS score collapses by 40%+ from IS.
+            candidate['oosOverfit'] = bool(
+                degradation is not None and degradation > 0.4
+            )
+        return ranked
+
+    @staticmethod
     def _build_generator_hints(regime: Dict[str, Any]) -> Dict[str, Any]:
         families = regime.get('strategyFamilies') or []
         return {
@@ -591,8 +897,27 @@ class ExperimentRunnerService:
 
     @staticmethod
     def _build_best_output(best: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Shape the best candidate for the frontend.
+
+        Includes both IS (training-window) and, when available, OOS
+        (held-out 30% window) summaries so the UI can show them side
+        by side. Previously only IS was returned, which made the
+        headline +X% return look like the candidate's real expected
+        performance and led to surprises when users re-ran the
+        candidate on the full window.
+        """
         if not best:
             return None
+        result = best.get('result') or {}
+        oos_result = best.get('oosResult') or {}
+        oos_summary = None
+        if oos_result:
+            oos_summary = {
+                'totalReturn': oos_result.get('totalReturn'),
+                'maxDrawdown': oos_result.get('maxDrawdown'),
+                'sharpeRatio': oos_result.get('sharpeRatio'),
+                'totalTrades': oos_result.get('totalTrades'),
+            }
         return {
             'name': best.get('name'),
             'score': best.get('score'),
@@ -600,9 +925,13 @@ class ExperimentRunnerService:
             'overrides': best.get('overrides'),
             'snapshot': best.get('snapshot'),
             'summary': {
-                'totalReturn': (best.get('result') or {}).get('totalReturn'),
-                'maxDrawdown': (best.get('result') or {}).get('maxDrawdown'),
-                'sharpeRatio': (best.get('result') or {}).get('sharpeRatio'),
-                'totalTrades': (best.get('result') or {}).get('totalTrades'),
+                'totalReturn': result.get('totalReturn'),
+                'maxDrawdown': result.get('maxDrawdown'),
+                'sharpeRatio': result.get('sharpeRatio'),
+                'totalTrades': result.get('totalTrades'),
             },
+            'oosSummary': oos_summary,
+            'oosScore': best.get('oosScore'),
+            'oosDegradation': best.get('oosDegradation'),
+            'oosOverfit': bool(best.get('oosOverfit')),
         }

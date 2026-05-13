@@ -14,179 +14,177 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Used for idempotency on registration. Keep in sync with _builtin_specs()[0]["name"].
+_BUILTIN_PACK_ANCHOR_NAME = "[Sample] SuperTrend Trend-Following"
+
+
+# QuantDinger Indicator IDE contract (the sandbox injects df / pd / np / params):
+#   * top of file declares my_indicator_name / my_indicator_description
+#   * df = df.copy()  -> work on a private copy
+#   * df['buy'] / df['sell'] are boolean Series with length == len(df)
+#   * output dict contains plots / signals; every data list MUST have length == len(df)
+#   * # @strategy ...  default risk controls; can be overridden in the backtest panel
+#   * # @param ... range=a:b:s  auto-detected by the structured parameter tuner
+_SUPERTREND_CODE = r'''# ============================================================
+# [Sample] SuperTrend Trend-Following -- classic ATR channel flip
+# ------------------------------------------------------------
+# Idea: build an adaptive band pair (HL2 +/- mult * ATR). The bands
+# can only tighten in the prevailing trend direction; price crossing
+# the opposite band flips the direction and fires a buy / sell signal.
+#
+# Design notes:
+#   1) ATR uses Wilder smoothing (ewm alpha=1/N) so values match
+#      TradingView, MT5 and most pro charting tools.
+#   2) Final upper / lower bands are path-dependent: they cannot
+#      drift in the unfavourable direction, so we recurse bar by bar
+#      in a Python loop instead of pure vectorisation.
+#   3) Signals fire on the bar where direction flips -- naturally
+#      edge-triggered, no repeat entries while the trend persists.
+#   4) Direction is compared against the PREVIOUS final band only
+#      (cl[i] vs final_*[i-1]) -> strictly no look-ahead bias.
+# ============================================================
+
+my_indicator_name = "[Sample] SuperTrend Trend-Following"
+my_indicator_description = (
+    "Classic SuperTrend: ATR-channel direction flip. Open on trend flip, "
+    "close on reverse flip. Tweak leverage / SL / TP / symbol / timeframe "
+    "in the backtest panel, or sweep params in the Smart Tuner."
+)
+
+# ===== Default risk controls (overridable in the backtest panel) =====
+# @strategy stopLossPct 0.04
+# @strategy takeProfitPct 0.10
+# @strategy entryPct 1
+# @strategy tradeDirection both
+
+# ===== Tunable params (auto-detected by the structured tuner via range=...) =====
+# @param atr_period int 10 ATR Wilder smoothing period range=7:21:1
+# @param multiplier float 3.0 ATR band multiplier range=1.5:5.0:0.5
+
+atr_period = int(params.get('atr_period', 10))
+multiplier = float(params.get('multiplier', 3.0))
+
+df = df.copy()
+high = df['high']
+low = df['low']
+close = df['close']
+prev_close = close.shift(1)
+
+# --- 1) True Range = max(H-L, |H-prevC|, |L-prevC|)
+tr = pd.concat([
+    high - low,
+    (high - prev_close).abs(),
+    (low - prev_close).abs(),
+], axis=1).max(axis=1)
+
+# --- 2) ATR via Wilder smoothing (RMA); first atr_period-1 bars are NaN
+atr = tr.ewm(alpha=1.0 / atr_period, adjust=False, min_periods=atr_period).mean()
+
+# --- 3) Basic upper / lower bands
+hl2 = (high + low) / 2.0
+upper_basic = hl2 + multiplier * atr
+lower_basic = hl2 - multiplier * atr
+
+# --- 4) Final bands + direction (path-dependent loop)
+n = len(df)
+ub = upper_basic.to_numpy()
+lb = lower_basic.to_numpy()
+cl = close.to_numpy()
+
+final_upper = np.full(n, np.nan)
+final_lower = np.full(n, np.nan)
+direction = np.zeros(n, dtype=np.int8)   # 1=long, -1=short, 0=warmup
+supertrend = np.full(n, np.nan)
+
+# Wait for Wilder ATR to stabilise before emitting any direction
+start_idx = int(atr_period)
+
+for i in range(n):
+    if i < start_idx or np.isnan(ub[i]) or np.isnan(lb[i]):
+        # Warmup bar: no signal, direction stays 0
+        continue
+
+    if i == start_idx or direction[i - 1] == 0:
+        # First valid bar: seed direction from close vs band midline
+        final_upper[i] = ub[i]
+        final_lower[i] = lb[i]
+        direction[i] = 1 if cl[i] >= (ub[i] + lb[i]) / 2.0 else -1
+        supertrend[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
+        continue
+
+    # Upper band may only tighten downward, unless price already broke above it
+    if (ub[i] < final_upper[i - 1]) or (cl[i - 1] > final_upper[i - 1]):
+        final_upper[i] = ub[i]
+    else:
+        final_upper[i] = final_upper[i - 1]
+
+    # Lower band may only tighten upward, unless price already broke below it
+    if (lb[i] > final_lower[i - 1]) or (cl[i - 1] < final_lower[i - 1]):
+        final_lower[i] = lb[i]
+    else:
+        final_lower[i] = final_lower[i - 1]
+
+    # Direction flip when close breaks the previous final band
+    if cl[i] > final_upper[i - 1]:
+        direction[i] = 1
+    elif cl[i] < final_lower[i - 1]:
+        direction[i] = -1
+    else:
+        direction[i] = direction[i - 1]
+
+    supertrend[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
+
+# --- 5) Edge-triggered signals: direction -1 -> 1 = buy, 1 -> -1 = sell
+prev_direction = np.concatenate([[0], direction[:-1]])
+buy_mask = (direction == 1) & (prev_direction == -1)
+sell_mask = (direction == -1) & (prev_direction == 1)
+
+df['buy'] = pd.Series(buy_mask, index=df.index).astype(bool)
+df['sell'] = pd.Series(sell_mask, index=df.index).astype(bool)
+
+# --- 6) Two-colour SuperTrend line: green while long, red while short
+supertrend_up = [float(v) if (d == 1 and not np.isnan(v)) else None
+                 for v, d in zip(supertrend, direction)]
+supertrend_dn = [float(v) if (d == -1 and not np.isnan(v)) else None
+                 for v, d in zip(supertrend, direction)]
+
+buy_marks = [df['low'].iloc[i] * 0.995 if bool(df['buy'].iloc[i]) else None
+             for i in range(n)]
+sell_marks = [df['high'].iloc[i] * 1.005 if bool(df['sell'].iloc[i]) else None
+              for i in range(n)]
+
+output = {
+    'name': my_indicator_name,
+    'plots': [
+        {'name': 'SuperTrend Up', 'data': supertrend_up, 'color': '#00E676', 'overlay': True},
+        {'name': 'SuperTrend Down', 'data': supertrend_dn, 'color': '#FF5252', 'overlay': True},
+    ],
+    'signals': [
+        {'type': 'buy', 'text': 'B', 'data': buy_marks, 'color': '#00E676'},
+        {'type': 'sell', 'text': 'S', 'data': sell_marks, 'color': '#FF5252'},
+    ],
+}
+'''
+
+
 def _builtin_specs() -> List[Dict[str, str]]:
-    """内置指标：name / description / code（与指标 IDE、回测引擎约定一致）。"""
+    """内置指标：name / description / code（与指标 IDE、回测引擎约定一致）。
+
+    现在只保留一个高质量示例 —— 经典 SuperTrend，作为「新手第一份指标」
+    的标杆样本：注释充分、可调参数化、严格无未来数据、信号边缘触发。
+    """
     return [
         {
-            "name": "[示例] RSI 边缘触发",
-            "description": "经典 RSI 超卖反弹买入、超买回落卖出；信号为「当根刚触发」避免重复开仓。适合熟悉回测面板与 @strategy。",
-            "code": r'''my_indicator_name = "[示例] RSI 边缘触发"
-my_indicator_description = "RSI 超卖/超买 + 边缘触发；可在回测面板调杠杆、周期与标的。"
-
-# @strategy stopLossPct 0.03
-# @strategy takeProfitPct 0.06
-# @strategy entryPct 1
-# @strategy tradeDirection long
-
-df = df.copy()
-rsi_len = 14
-delta = df['close'].diff()
-gain = delta.clip(lower=0)
-loss = (-delta).clip(lower=0)
-avg_gain = gain.ewm(alpha=1 / rsi_len, adjust=False).mean()
-avg_loss = loss.ewm(alpha=1 / rsi_len, adjust=False).mean()
-rs = avg_gain / avg_loss.replace(0, np.nan)
-rsi = 100 - (100 / (1 + rs))
-rsi = rsi.fillna(50)
-
-raw_buy = rsi < 30
-raw_sell = rsi > 70
-buy = raw_buy.fillna(False) & (~raw_buy.shift(1).fillna(False))
-sell = raw_sell.fillna(False) & (~raw_sell.shift(1).fillna(False))
-df['buy'] = buy.astype(bool)
-df['sell'] = sell.astype(bool)
-
-buy_marks = [df['low'].iloc[i] * 0.995 if bool(buy.iloc[i]) else None for i in range(len(df))]
-sell_marks = [df['high'].iloc[i] * 1.005 if bool(sell.iloc[i]) else None for i in range(len(df))]
-
-output = {
-    'name': my_indicator_name,
-    'plots': [
-        {'name': 'RSI(14)', 'data': rsi.tolist(), 'color': '#faad14', 'overlay': False}
-    ],
-    'signals': [
-        {'type': 'buy', 'text': 'B', 'data': buy_marks, 'color': '#00E676'},
-        {'type': 'sell', 'text': 'S', 'data': sell_marks, 'color': '#FF5252'}
-    ]
-}
-''',
-        },
-        {
-            "name": "[示例] 双均线金叉死叉",
-            "description": "快线上穿慢线做多，下穿做空；参数可直接在代码里改 fast/slow 周期。",
-            "code": r'''my_indicator_name = "[示例] 双均线金叉死叉"
-my_indicator_description = "快慢均线交叉；边缘触发。杠杆、手续费等在回测面板设置。"
-
-# @strategy stopLossPct 0.025
-# @strategy takeProfitPct 0.05
-# @strategy entryPct 1
-# @strategy tradeDirection both
-
-df = df.copy()
-fast_n = 12
-slow_n = 26
-ma_f = df['close'].rolling(fast_n, min_periods=1).mean()
-ma_s = df['close'].rolling(slow_n, min_periods=1).mean()
-
-golden = (ma_f > ma_s) & (ma_f.shift(1) <= ma_s.shift(1))
-death = (ma_f < ma_s) & (ma_f.shift(1) >= ma_s.shift(1))
-df['buy'] = golden.fillna(False).astype(bool)
-df['sell'] = death.fillna(False).astype(bool)
-
-buy_marks = [df['low'].iloc[i] * 0.995 if bool(df['buy'].iloc[i]) else None for i in range(len(df))]
-sell_marks = [df['high'].iloc[i] * 1.005 if bool(df['sell'].iloc[i]) else None for i in range(len(df))]
-
-output = {
-    'name': my_indicator_name,
-    'plots': [
-        {'name': f'MA({fast_n})', 'data': ma_f.tolist(), 'color': '#1890ff', 'overlay': True},
-        {'name': f'MA({slow_n})', 'data': ma_s.tolist(), 'color': '#ff7a45', 'overlay': True}
-    ],
-    'signals': [
-        {'type': 'buy', 'text': 'B', 'data': buy_marks, 'color': '#00E676'},
-        {'type': 'sell', 'text': 'S', 'data': sell_marks, 'color': '#FF5252'}
-    ]
-}
-''',
-        },
-        {
-            "name": "[示例] MACD 柱穿零轴",
-            "description": "MACD 柱状线由负转正试多，由正转负试空；适合观察动量切换。",
-            "code": r'''my_indicator_name = "[示例] MACD 柱穿零轴"
-my_indicator_description = "DIF/DEA/柱；柱线穿越零轴边缘触发。可与 1H/4H 加密合约回测配合。"
-
-# @strategy stopLossPct 0.03
-# @strategy takeProfitPct 0.08
-# @strategy entryPct 0.5
-# @strategy tradeDirection both
-
-df = df.copy()
-exp12 = df['close'].ewm(span=12, adjust=False).mean()
-exp26 = df['close'].ewm(span=26, adjust=False).mean()
-dif = exp12 - exp26
-dea = dif.ewm(span=9, adjust=False).mean()
-hist = dif - dea
-
-raw_buy = (hist > 0) & (hist.shift(1) <= 0)
-raw_sell = (hist < 0) & (hist.shift(1) >= 0)
-df['buy'] = raw_buy.fillna(False).astype(bool)
-df['sell'] = raw_sell.fillna(False).astype(bool)
-
-buy_marks = [df['low'].iloc[i] * 0.995 if bool(df['buy'].iloc[i]) else None for i in range(len(df))]
-sell_marks = [df['high'].iloc[i] * 1.005 if bool(df['sell'].iloc[i]) else None for i in range(len(df))]
-
-output = {
-    'name': my_indicator_name,
-    'plots': [
-        {'name': 'MACD DIF', 'data': dif.tolist(), 'color': '#1890ff', 'overlay': False},
-        {'name': 'MACD DEA', 'data': dea.tolist(), 'color': '#ff7a45', 'overlay': False},
-        {'name': 'MACD Hist', 'data': hist.tolist(), 'color': '#888888', 'overlay': False}
-    ],
-    'signals': [
-        {'type': 'buy', 'text': 'B', 'data': buy_marks, 'color': '#00E676'},
-        {'type': 'sell', 'text': 'S', 'data': sell_marks, 'color': '#FF5252'}
-    ]
-}
-''',
-        },
-        {
-            "name": "[示例] 布林带触及",
-            "description": "收盘价跌破下轨产生买入信号，突破上轨产生卖出信号（边缘触发）。",
-            "code": r'''my_indicator_name = "[示例] 布林带触及"
-my_indicator_description = "简单布林带反转思路示例；实盘请结合趋势过滤与风控。"
-
-# @strategy stopLossPct 0.02
-# @strategy takeProfitPct 0.04
-# @strategy entryPct 0.3
-# @strategy tradeDirection long
-
-df = df.copy()
-period = 20
-mult = 2.0
-mid = df['close'].rolling(period, min_periods=1).mean()
-std = df['close'].rolling(period, min_periods=1).std()
-upper = mid + mult * std
-lower = mid - mult * std
-
-raw_buy = df['close'] < lower
-raw_sell = df['close'] > upper
-buy = raw_buy.fillna(False) & (~raw_buy.shift(1).fillna(False))
-sell = raw_sell.fillna(False) & (~raw_sell.shift(1).fillna(False))
-df['buy'] = buy.astype(bool)
-df['sell'] = sell.astype(bool)
-
-buy_marks = [df['low'].iloc[i] * 0.995 if bool(buy.iloc[i]) else None for i in range(len(df))]
-sell_marks = [df['high'].iloc[i] * 1.005 if bool(sell.iloc[i]) else None for i in range(len(df))]
-
-output = {
-    'name': my_indicator_name,
-    'plots': [
-        {'name': 'BOLL 上', 'data': upper.tolist(), 'color': '#69c0ff', 'overlay': True},
-        {'name': 'BOLL 中', 'data': mid.tolist(), 'color': '#d9d9d9', 'overlay': True},
-        {'name': 'BOLL 下', 'data': lower.tolist(), 'color': '#69c0ff', 'overlay': True}
-    ],
-    'signals': [
-        {'type': 'buy', 'text': 'B', 'data': buy_marks, 'color': '#00E676'},
-        {'type': 'sell', 'text': 'S', 'data': sell_marks, 'color': '#FF5252'}
-    ]
-}
-''',
+            "name": _BUILTIN_PACK_ANCHOR_NAME,
+            "description": (
+                "Classic SuperTrend (ATR-channel direction flip): Wilder-smoothed ATR "
+                "drives adaptive upper / lower bands; opens on trend flip and closes "
+                "on the reverse flip. Tunable params are declared via @param so the "
+                "Smart Tuner can sweep them out-of-the-box."
+            ),
+            "code": _SUPERTREND_CODE,
         },
     ]
-
-
-# 与 _builtin_specs()[0]["name"] 一致，用于注册时幂等判断
-_BUILTIN_PACK_ANCHOR_NAME = "[示例] RSI 边缘触发"
 
 
 def seed_builtin_indicators_for_new_user(db: Any, user_id: int) -> int:

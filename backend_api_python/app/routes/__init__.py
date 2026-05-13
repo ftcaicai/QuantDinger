@@ -19,6 +19,7 @@ def register_routes(app: Flask):
     from app.routes.settings import settings_bp
     from app.routes.portfolio import portfolio_bp
     from app.routes.ibkr import ibkr_bp
+    from app.routes.alpaca import alpaca_bp
     from app.routes.mt5 import mt5_bp
     from app.routes.user import user_bp
     from app.routes.global_market import global_market_bp
@@ -43,6 +44,7 @@ def register_routes(app: Flask):
     app.register_blueprint(settings_bp, url_prefix='/api/settings')
     app.register_blueprint(portfolio_bp, url_prefix='/api/portfolio')
     app.register_blueprint(ibkr_bp, url_prefix='/api/ibkr')
+    app.register_blueprint(alpaca_bp, url_prefix='/api/alpaca')
     app.register_blueprint(mt5_bp, url_prefix='/api/mt5')
     app.register_blueprint(global_market_bp, url_prefix='/api/global-market')
     app.register_blueprint(community_bp, url_prefix='/api/community')

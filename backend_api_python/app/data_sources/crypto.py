@@ -20,7 +20,20 @@ class CryptoDataSource(BaseDataSource):
     
     # 时间周期映射
     TIMEFRAME_MAP = CCXTConfig.TIMEFRAME_MAP
-    
+
+    # 当某个交易所原生不支持某个CCXT周期时，从更细的granularity拉数据后聚合。
+    # 例如Coinbase Advanced Trade只暴露1m/5m/15m/30m/1h/2h/6h/1d，没有3m/4h/1w，
+    # 这里给出每个缺失目标对应的"源周期 + 倍数"候选（按优先顺序）。
+    _RESAMPLE_CANDIDATES: Dict[str, List[Tuple[str, int]]] = {
+        '3m': [('1m', 3)],
+        '4h': [('2h', 2), ('1h', 4)],
+        '1w': [('1d', 7)],
+    }
+
+    # CCXT单次fetch_ohlcv请求上限（Coinbase REST是300，多数交易所也在300附近）。
+    # 聚合路径fetch源数据时按这个值兜底，避免请求被服务端截断。
+    _SINGLE_FETCH_HARD_CAP = 300
+
     # 常见的报价货币列表（按优先级排序）
     COMMON_QUOTES = ['USDT', 'USD', 'BTC', 'ETH', 'BUSD', 'USDC', 'BNB', 'EUR', 'GBP']
     
@@ -242,24 +255,65 @@ class CryptoDataSource(BaseDataSource):
         
         try:
             ccxt_timeframe = self.TIMEFRAME_MAP.get(timeframe, '1d')
-            
+
+            # 如果当前交易所原生不支持这个周期（典型例子：Coinbase 没有 1w/4h/3m），
+            # 改为从更细的granularity拉数据，再在服务端聚合成目标周期。这样1W/4H在
+            # 不支持的交易所上仍可使用，无需前端改动。
+            resample_bucket = 1
+            fetch_ccxt_timeframe = ccxt_timeframe
+            fetch_qd_timeframe = timeframe
+            fetch_limit = limit
+
+            exchange_timeframes = getattr(self.exchange, 'timeframes', None) or {}
+            if exchange_timeframes and ccxt_timeframe not in exchange_timeframes:
+                picked = self._pick_resample_source(ccxt_timeframe, exchange_timeframes)
+                if picked is None:
+                    logger.warning(
+                        f"Exchange '{self.exchange.id}' cannot serve timeframe '{ccxt_timeframe}' "
+                        f"and no finer supported granularity is available for resampling. "
+                        f"Supported: {sorted(exchange_timeframes.keys())}"
+                    )
+                    return []
+                source_ccxt_tf, bucket = picked
+                fetch_ccxt_timeframe = source_ccxt_tf
+                fetch_qd_timeframe = self._ccxt_to_qd_timeframe(source_ccxt_tf, timeframe)
+                resample_bucket = bucket
+                # 单次fetch_ohlcv受交易所上限制约（Coinbase=300），超出会被截断；
+                # 在这之内取尽量多的源candle以填满请求的聚合数。
+                fetch_limit = min(limit * bucket, self._SINGLE_FETCH_HARD_CAP)
+                logger.info(
+                    f"Exchange '{self.exchange.id}' has no native '{ccxt_timeframe}' "
+                    f"timeframe; fetching '{source_ccxt_tf}' x{bucket} candles "
+                    f"({fetch_limit}) and resampling to '{ccxt_timeframe}'"
+                )
+
             # 使用统一的符号规范化方法
             symbol_pair = self._normalize_symbol_for_exchange(symbol)
-            
+
             if not symbol_pair:
                 logger.warning(f"Failed to normalize symbol for K-line: {symbol}")
                 return []
-            
+
             # logger.info(f"获取加密货币K线: {symbol_pair}, 周期: {ccxt_timeframe}, 条数: {limit}")
-            
+
             ohlcv = self._fetch_ohlcv(
-                symbol_pair, ccxt_timeframe, limit, before_time, timeframe, after_time
+                symbol_pair, fetch_ccxt_timeframe, fetch_limit,
+                before_time, fetch_qd_timeframe, after_time,
             )
-            
+
             if not ohlcv:
                 logger.warning(f"CCXT returned no K-lines: {symbol_pair}")
                 return []
-            
+
+            if resample_bucket > 1:
+                ohlcv = self._resample_ohlcv(ohlcv, resample_bucket)
+                if not ohlcv:
+                    logger.warning(
+                        f"Resampling produced no candles for {symbol_pair} "
+                        f"(bucket={resample_bucket}, source len was less than one bucket)"
+                    )
+                    return []
+
             # 转换数据格式
             for candle in ohlcv:
                 if len(candle) < 6:
@@ -304,7 +358,58 @@ class CryptoDataSource(BaseDataSource):
             logger.error(traceback.format_exc())
         
         return klines
-    
+
+    @classmethod
+    def _pick_resample_source(
+        cls,
+        target_ccxt_timeframe: str,
+        exchange_timeframes: Dict[str, Any],
+    ) -> Optional[Tuple[str, int]]:
+        """Pick the finest supported source timeframe to resample into `target_ccxt_timeframe`.
+
+        Returns (source_ccxt_timeframe, bucket_size) or None if no candidate is supported.
+        """
+        for source, bucket in cls._RESAMPLE_CANDIDATES.get(target_ccxt_timeframe, []):
+            if source in exchange_timeframes:
+                return source, bucket
+        return None
+
+    @staticmethod
+    def _resample_ohlcv(ohlcv: List[List[Any]], bucket_size: int) -> List[List[Any]]:
+        """Aggregate every `bucket_size` consecutive CCXT OHLCV rows into one larger candle.
+
+        Each input row is [ts_ms, open, high, low, close, volume]. Output preserves the
+        first row's timestamp and open, takes max(high)/min(low), the last row's close,
+        and sums volume. The trailing partial bucket is dropped so every returned candle
+        represents `bucket_size` source candles.
+        """
+        if bucket_size <= 1 or not ohlcv:
+            return list(ohlcv or [])
+        out: List[List[Any]] = []
+        for i in range(0, len(ohlcv), bucket_size):
+            chunk = ohlcv[i:i + bucket_size]
+            if len(chunk) < bucket_size:
+                break  # drop incomplete trailing bucket
+            out.append([
+                chunk[0][0],
+                chunk[0][1],
+                max(c[2] for c in chunk),
+                min(c[3] for c in chunk),
+                chunk[-1][4],
+                sum(c[5] for c in chunk),
+            ])
+        return out
+
+    @classmethod
+    def _ccxt_to_qd_timeframe(cls, ccxt_tf: str, fallback: str) -> str:
+        """Reverse the TIMEFRAME_MAP — e.g. '1d' → '1D'. Used so downstream helpers
+        that take the QuantDinger-style timeframe string get a consistent value when
+        we fetch a different granularity than originally requested."""
+        for qd, ccxt_value in cls.TIMEFRAME_MAP.items():
+            if ccxt_value == ccxt_tf:
+                return qd
+        return fallback
+
     def _fetch_ohlcv(
         self,
         symbol_pair: str,

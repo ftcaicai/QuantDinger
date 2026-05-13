@@ -613,7 +613,7 @@ class BacktestService:
         # 4. Use execution timeframe for precise trade simulation
         try:
             logger.info("Starting MTF trading simulation...")
-            equity_curve, trades, total_commission = self._simulate_trading_mtf(
+            _mtf_ret = self._simulate_trading_mtf(
             df_signal=df_signal,
             df_exec=df_exec,
             signals=signals,
@@ -626,6 +626,14 @@ class BacktestService:
                 signal_timeframe=timeframe,
                 exec_timeframe=exec_tf
             )
+            # Backward-compat: older signature returned 3-tuple, current returns
+            # 4-tuple with `total_funding_paid` last. Tolerate both so older
+            # forks of `_simulate_trading_mtf` don't break this call site.
+            if len(_mtf_ret) == 4:
+                equity_curve, trades, total_commission, total_funding = _mtf_ret
+            else:
+                equity_curve, trades, total_commission = _mtf_ret
+                total_funding = 0.0
             logger.info(f"MTF simulation completed: {len(trades)} trades executed")
         except Exception as e:
             logger.error(f"MTF simulation failed: {str(e)}")
@@ -650,6 +658,10 @@ class BacktestService:
             result['execution_timeframe'] = exec_tf
             result['signal_candles'] = len(df_signal)
             result['execution_candles'] = len(df_exec)
+            try:
+                result['totalFundingPaid'] = round(float(total_funding or 0.0), 6)
+            except Exception:
+                result['totalFundingPaid'] = 0.0
             result['executionAssumptions'] = self._execution_assumptions(
                 strategy_config,
                 simulation_mode='mtf',
@@ -712,7 +724,33 @@ class BacktestService:
         trailing_enabled = bool(trailing_cfg.get('enabled'))
         trailing_pct = float(trailing_cfg.get('pct') or 0.0)
         trailing_activation_pct = float(trailing_cfg.get('activationPct') or 0.0)
-        
+
+        # Funding rate simulation. Off by default for backward compatibility.
+        # Annual rate accepts both decimal (0.10 = 10%) and percentage (10 = 10%).
+        # We charge `notional * rate_per_period` from capital at every funding
+        # boundary that falls within the bar's [open_ts, open_ts + tf) window.
+        # Sign convention: positive rate => long pays / short receives.
+        fees_cfg = cfg.get('fees') or {}
+        funding_rate_annual_raw = fees_cfg.get('fundingRateAnnual', 0)
+        try:
+            funding_rate_annual = float(funding_rate_annual_raw or 0)
+        except (TypeError, ValueError):
+            funding_rate_annual = 0.0
+        # Auto-detect "percent" inputs (e.g. 10 instead of 0.10).
+        if abs(funding_rate_annual) > 1.5:
+            funding_rate_annual = funding_rate_annual / 100.0
+        try:
+            funding_interval_hours = float(fees_cfg.get('fundingIntervalHours') or 8)
+        except (TypeError, ValueError):
+            funding_interval_hours = 8.0
+        if funding_interval_hours <= 0:
+            funding_interval_hours = 8.0
+        funding_periods_per_year = (365.25 * 24.0) / funding_interval_hours
+        funding_rate_per_period = (funding_rate_annual / funding_periods_per_year) if funding_periods_per_year > 0 else 0.0
+        funding_enabled = abs(funding_rate_per_period) > 1e-12
+        funding_interval_seconds = int(funding_interval_hours * 3600)
+        total_funding_paid = 0.0
+
         lev = max(int(leverage or 1), 1)
         stop_loss_pct_eff = stop_loss_pct / lev if stop_loss_pct > 0 else 0
         take_profit_pct_eff = take_profit_pct / lev if take_profit_pct > 0 else 0
@@ -933,6 +971,9 @@ class BacktestService:
         
         logger.info(f"Starting execution loop: {total_exec_candles} candles to process, {len(signal_queue)} signals in queue")
         
+        # Funding cursor: epoch seconds of the next due funding payment.
+        # Initialised lazily on the first bar so we don't need start_date here.
+        next_funding_ts = None
         for i, (timestamp, row) in enumerate(df_exec.iterrows()):
             # Progress logging
             if i > 0 and i % progress_log_interval == 0:
@@ -941,6 +982,39 @@ class BacktestService:
             # 爆仓后直接停止回测，输出结果
             if is_liquidated:
                 break
+
+            # Funding fee accrual — runs once per bar, BEFORE signal/SL processing
+            # so trades that close on this bar still pay one period of carry.
+            # We charge for every funding boundary that falls within
+            # [bar_open_ts, bar_open_ts + exec_tf). Multiple boundaries per bar
+            # are rare (only when exec_tf > funding interval) but handled.
+            if funding_enabled and position != 0:
+                try:
+                    bar_ts = int(timestamp.timestamp())
+                except Exception:
+                    bar_ts = None
+                if bar_ts is not None:
+                    if next_funding_ts is None:
+                        next_funding_ts = ((bar_ts // funding_interval_seconds) + 1) * funding_interval_seconds
+                    bar_end_ts = bar_ts + exec_tf_seconds
+                    while next_funding_ts < bar_end_ts:
+                        if position != 0:
+                            # Notional uses current entry-price reference; this is a
+                            # conservative approximation for cross/isolated margin.
+                            notional = abs(position) * (entry_price if entry_price else 0.0)
+                            if notional > 0:
+                                # Long pays positive funding, short receives it.
+                                sign = 1.0 if position > 0 else -1.0
+                                funding_charge = notional * funding_rate_per_period * sign
+                                capital -= funding_charge
+                                total_funding_paid += funding_charge
+                                if capital <= 0:
+                                    capital = 0
+                                    is_liquidated = True
+                                    break
+                        next_funding_ts += funding_interval_seconds
+                if is_liquidated:
+                    break
 
             # bar_time: floor of execution timestamp to signal timeframe.
             # This is the chart-bar that the front-end displays and is used to
@@ -1452,8 +1526,10 @@ class BacktestService:
                 logger.error(f"  First few signals: {signal_queue[:min(5, len(signal_queue))]}")
                 logger.error(f"  Exec data range: {df_exec.index[0]} to {df_exec.index[-1]}")
                 raise ValueError(f"No trades executed despite {len(signal_queue)} signals. Check signal timing and position state logic.")
-        
-        return equity_curve, trades, total_commission_paid
+
+        self._annotate_signal_bar_times(trades, signal_tf_seconds, signal_timing)
+
+        return equity_curve, trades, total_commission_paid, total_funding_paid
 
     def run_strategy_snapshot(
         self,
@@ -4921,6 +4997,57 @@ class BacktestService:
         if mtf_fallback_reason:
             payload['mtfFallbackReason'] = mtf_fallback_reason
         return payload
+
+    @staticmethod
+    def _annotate_signal_bar_times(
+        trades: List[Dict[str, Any]],
+        signal_tf_seconds: int,
+        signal_timing: str,
+    ) -> None:
+        """Backfill `signal_bar_time` onto every trade for chart double-display.
+
+        Convention for the frontend overlay layer:
+          * `bar_time`        = chart-aligned EXECUTION bar (what user sees as fill)
+          * `signal_bar_time` = chart-aligned SIGNAL bar (where the rule fired)
+
+        For pure signal-triggered open/close (no _stop/_profit/_trailing/liquidation
+        suffix) under `next_bar_open`, signal bar is exactly one signal_tf BEFORE
+        the execution bar. For SL/TP/trailing/liquidation triggers, there is no
+        meaningful "signal bar" — they fire intra-bar from the price path — so we
+        align signal_bar_time to bar_time so the renderer only draws a single marker.
+        For `bar_close` execution mode, signal and execution coincide on the same bar.
+        """
+        if not trades:
+            return
+        delta_seconds = int(signal_tf_seconds) if signal_tf_seconds else 0
+        use_offset = (
+            delta_seconds > 0
+            and str(signal_timing or '').strip().lower()
+            in ('next_bar_open', 'next_open', 'nextopen', 'next')
+        )
+        delta = timedelta(seconds=delta_seconds) if use_offset else timedelta(0)
+        for trade in trades:
+            if 'signal_bar_time' in trade:
+                continue
+            bt = trade.get('bar_time') or trade.get('time')
+            if not bt:
+                trade['signal_bar_time'] = None
+                continue
+            ty = str(trade.get('type') or '').lower()
+            price_path_trigger = (
+                '_stop' in ty
+                or '_profit' in ty
+                or '_trailing' in ty
+                or ty == 'liquidation'
+            )
+            if not use_offset or price_path_trigger:
+                trade['signal_bar_time'] = bt
+                continue
+            try:
+                bt_dt = pd.to_datetime(bt)
+                trade['signal_bar_time'] = (bt_dt - delta).strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                trade['signal_bar_time'] = bt
 
     def _format_result(
         self,

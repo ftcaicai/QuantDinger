@@ -69,6 +69,45 @@ def test_evolution_builds_variants_from_parameter_space():
     assert 'takeProfitPct' in variants[0]['snapshot']['strategy_config']['risk']
 
 
+def test_evolution_sweeps_indicator_level_params():
+    """Regression: `indicator_params.atr_period` style keys must reach
+    `snapshot['indicator_params']['atr_period']`, otherwise the structured
+    tuner cannot drive multi-param indicators (RSI/MACD/EMA/ATR etc.) — only
+    risk/leverage. Covers the P1 frontend auto-inference path that emits
+    `indicator_params.<name>` for every @param the user writes."""
+    service = StrategyEvolutionService()
+    variants = service.build_variants(
+        base_snapshot={
+            'strategy_config': {'risk': {'stopLossPct': 2}},
+            'indicator_params': {'atr_period': 10, 'multiplier': 3.0},
+        },
+        parameter_space={
+            'indicator_params.atr_period': [7, 14, 21],
+            'indicator_params.multiplier': [1.5, 3.0, 4.5],
+            'leverage': [1, 2],
+        },
+        max_variants=6,
+        method='grid',
+    )
+
+    assert len(variants) == 6
+    for v in variants:
+        ind = v['snapshot']['indicator_params']
+        assert ind['atr_period'] in {7, 14, 21}
+        assert ind['multiplier'] in {1.5, 3.0, 4.5}
+        assert v['snapshot']['leverage'] in {1, 2}
+        # The override map should expose the indicator keys for the UI.
+        assert 'indicator_params.atr_period' in v['overrides']
+        assert 'indicator_params.multiplier' in v['overrides']
+
+    # Distinct (atr_period, multiplier, leverage) combos must appear — verifies
+    # the Cartesian product is shuffled rather than collapsed onto one corner.
+    combos = {(v['overrides']['indicator_params.atr_period'],
+               v['overrides']['indicator_params.multiplier'],
+               v['overrides']['leverage']) for v in variants}
+    assert len(combos) == 6
+
+
 class _FakeBacktestService:
     def _fetch_kline_data(self, market, symbol, timeframe, start_date, end_date):
         return pd.DataFrame({

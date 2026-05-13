@@ -102,7 +102,10 @@ def _summarise_indicator_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
             continue
         try:
             score_info = scorer.score_result(rj)
-            score_val = float(score_info.get('overall') or 0)
+            # StrategyScoringService returns 'overallScore' (not 'overall').
+            # Reading the wrong key here previously made every indicator's
+            # market-page composite score read 0, regardless of backtest quality.
+            score_val = float(score_info.get('overallScore') or 0)
         except Exception:
             logger.debug("score_result failed for run %s", run.get('id'), exc_info=True)
             score_val = 0.0
